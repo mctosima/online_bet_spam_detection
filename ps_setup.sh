@@ -21,8 +21,7 @@ source .venv/bin/activate
 
 # Install required packages
 echo "Installing required Python packages..."
-uv pip install numpy pandas matplotlib scikit-learn nltk wandb transformers openpyxl
-uv pip install torch
+uv pip install numpy pandas matplotlib scikit-learn nltk wandb transformers openpyxl torch
 
 # Set up Weights & Biases
 echo "Setting up Weights & Biases..."
@@ -58,7 +57,7 @@ echo "- Repository contents in current directory"
 echo "- Weights & Biases configured"
 echo ""
 echo "To run training with W&B logging, use:"
-echo "python train.py --use_wandb --wandb_project YOUR_PROJECT_NAME --wandb_entity YOUR_WANDB_USERNAME"
+echo "python ycj_train.py --use_wandb --wandb_project YOUR_PROJECT_NAME --wandb_entity YOUR_WANDB_USERNAME"
 
 # Activate the virtual environment again to ensure it's active
 source .venv/bin/activate
@@ -71,3 +70,6 @@ if [ -d "$TEMP_DIR" ]; then
 else
     echo "Temporary directory not found. Already cleaned up."
 fi
+
+# Activate the virtual environment again to ensure it's active
+source .venv/bin/activate

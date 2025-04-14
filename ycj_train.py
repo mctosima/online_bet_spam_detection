@@ -40,15 +40,15 @@ def parse_args():
                         help='Pre-trained BERT model name')
     parser.add_argument('--max_length', type=int, default=128,
                         help='Maximum sequence length')
-    parser.add_argument('--dropout', type=float, default=0.3,
+    parser.add_argument('--dropout', type=float, default=0.2,
                         help='Dropout rate')
     
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=32,
                         help='Batch size')
-    parser.add_argument('--epochs', type=int, default=20,
+    parser.add_argument('--epochs', type=int, default=35,
                         help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=2e-5,
+    parser.add_argument('--lr', type=float, default=5e-5,
                         help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01,
                         help='Weight decay')
@@ -153,6 +153,57 @@ def get_dataloaders_for_fold(args, fold):
     )
     
     return train_loader, val_loader, train_dataset
+
+def manage_checkpoints(model, epoch, accuracy, fold_output_dir, max_checkpoints=3):
+    """
+    Save model checkpoint and maintain only top N checkpoints based on accuracy.
+    
+    Args:
+        model: Model to save
+        epoch: Current epoch number
+        accuracy: Validation accuracy
+        fold_output_dir: Output directory for the current fold
+        max_checkpoints: Maximum number of checkpoints to keep
+    
+    Returns:
+        checkpoint_path: Path to the saved checkpoint
+    """
+    # Create checkpoints directory if it doesn't exist
+    checkpoints_dir = os.path.join(fold_output_dir, "checkpoints")
+    os.makedirs(checkpoints_dir, exist_ok=True)
+    
+    # Format checkpoint filename with epoch and accuracy
+    checkpoint_name = f"epoch-{epoch+1:02d}_acc-{accuracy:.4f}.pt"
+    checkpoint_path = os.path.join(checkpoints_dir, checkpoint_name)
+    
+    # Save current model
+    model.save_model(checkpoint_path)
+    
+    # Get all existing checkpoints and their accuracies
+    checkpoints = []
+    for file in os.listdir(checkpoints_dir):
+        if file.endswith(".pt") and file.startswith("epoch-"):
+            try:
+                # Extract accuracy from filename
+                acc = float(file.split("_acc-")[1].split(".pt")[0])
+                checkpoints.append((os.path.join(checkpoints_dir, file), acc))
+            except (IndexError, ValueError):
+                continue
+    
+    # Sort checkpoints by accuracy (descending)
+    checkpoints.sort(key=lambda x: x[1], reverse=True)
+    
+    # Remove excess checkpoints (keep only top max_checkpoints)
+    if len(checkpoints) > max_checkpoints:
+        for cp_path, _ in checkpoints[max_checkpoints:]:
+            try:
+                os.remove(cp_path)
+                print(f"Removed checkpoint: {os.path.basename(cp_path)}")
+            except OSError as e:
+                print(f"Error removing checkpoint {cp_path}: {e}")
+    
+    # Return path to the current checkpoint
+    return checkpoint_path
 
 def train_fold(fold, args, output_dir, device):
     """Train and evaluate model on a specific fold"""
@@ -343,6 +394,10 @@ def train_fold(fold, args, output_dir, device):
               f"Time: {val_time:.2f}s")
         print(f"Current learning rate: {current_lr}")
         
+        # Save checkpoint for this epoch
+        checkpoint_path = manage_checkpoints(model, epoch, val_metrics['accuracy'], fold_output_dir, max_checkpoints=3)
+        print(f"Saved checkpoint: {os.path.basename(checkpoint_path)}")
+        
         # Step LR scheduler after validation
         prev_lr = optimizer.param_groups[0]['lr']
         lr_scheduler.step(val_metrics['weighted_f1'])
@@ -489,6 +544,69 @@ def train_fold(fold, args, output_dir, device):
     
     return final_metrics, best_val_f1
 
+def log_run_summary(output_dir, run_name, fold_results, best_f1_scores, best_epochs):
+    """
+    Create a summary log of the training run with metrics for each fold.
+    
+    Args:
+        output_dir: Base output directory
+        run_name: Name of the run
+        fold_results: List of metrics for each fold
+        best_f1_scores: List of best F1 scores for each fold
+        best_epochs: List of best epochs for each fold
+    """
+    # Create runlog directory if it doesn't exist
+    runlog_dir = os.path.join(os.path.dirname(output_dir), "runlog")
+    os.makedirs(runlog_dir, exist_ok=True)
+    
+    # Extract run name from output_dir if not provided
+    if run_name is None:
+        run_name = os.path.basename(output_dir)
+    
+    # Prepare the log file path
+    log_file = os.path.join(runlog_dir, f"{run_name}.csv")
+    
+    # Create header and data rows
+    header = ["Fold", "Best Epoch", "Accuracy", "Weighted F1", "Macro F1", "Best F1"]
+    rows = []
+    
+    for i, (metrics, best_f1, best_epoch) in enumerate(zip(fold_results, best_f1_scores, best_epochs)):
+        rows.append([
+            i,
+            best_epoch + 1,  # +1 because epochs are 0-indexed
+            metrics["accuracy"],
+            metrics["weighted_f1"],
+            metrics["macro_f1"],
+            best_f1
+        ])
+    
+    # Add average row
+    avg_accuracy = np.mean([metrics['accuracy'] for metrics in fold_results])
+    avg_macro_f1 = np.mean([metrics['macro_f1'] for metrics in fold_results])
+    avg_weighted_f1 = np.mean([metrics['weighted_f1'] for metrics in fold_results])
+    avg_best_f1 = np.mean(best_f1_scores)
+    
+    rows.append([
+        "Average",
+        "-",
+        avg_accuracy,
+        avg_weighted_f1,
+        avg_macro_f1,
+        avg_best_f1
+    ])
+    
+    # Write to CSV
+    with open(log_file, 'w', newline='') as f:
+        import csv
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+    
+    print(f"Run summary saved to {log_file}")
+    
+    # Return the path to the log file
+    return log_file
+
 def main():
     """Main training function"""
     # Parse arguments
@@ -501,6 +619,11 @@ def main():
     output_dir = create_output_dir(args.output_dir)
     print(f"Output directory: {output_dir}")
     
+    # Extract run_name from output_dir for logging
+    run_name = os.path.basename(output_dir)
+    if args.run_name:
+        run_name = f"{run_name}_{args.run_name}"
+    
     # Save args
     with open(os.path.join(output_dir, 'args.json'), 'w') as f:
         json.dump(vars(args), f, indent=2)
@@ -508,14 +631,14 @@ def main():
     # Initialize wandb
     if args.use_wandb:
         timestamp = datetime.now().strftime('%Y%m%d-%H%M')
-        run_name = f"{timestamp}_"
+        wandb_run_name = f"{timestamp}_"
         if args.run_name:
-            run_name += args.run_name
+            wandb_run_name += args.run_name
         
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
-            name=run_name,
+            name=wandb_run_name,
             config=vars(args),
             dir=output_dir
         )
@@ -530,11 +653,17 @@ def main():
     # Cross-validation
     fold_results = []
     best_f1_scores = []
+    best_epochs = []
     
     for fold in range(args.n_folds):
         fold_metrics, best_val_f1 = train_fold(fold, args, output_dir, device)
         fold_results.append(fold_metrics)
         best_f1_scores.append(best_val_f1)
+        
+        # Find the best epoch from the fold's training history
+        with open(os.path.join(output_dir, f"fold_{fold}", "training_history.json"), "r") as f:
+            history = json.load(f)
+            best_epochs.append(history["best_epoch"])
     
     # Compute average metrics across folds
     avg_accuracy = np.mean([metrics['accuracy'] for metrics in fold_results])
@@ -568,6 +697,7 @@ def main():
             for metrics in fold_results
         ],
         'best_f1_scores': best_f1_scores,
+        'best_epochs': best_epochs,
         'avg_accuracy': avg_accuracy,
         'avg_macro_f1': avg_macro_f1,
         'avg_weighted_f1': avg_weighted_f1,
@@ -576,6 +706,13 @@ def main():
     
     with open(os.path.join(output_dir, 'cv_results.json'), 'w') as f:
         json.dump(cv_results, f, indent=2)
+    
+    # Create and save run summary
+    log_file = log_run_summary(output_dir, run_name, fold_results, best_f1_scores, best_epochs)
+    
+    # Log summary file to wandb if enabled
+    if args.use_wandb:
+        wandb.save(log_file)
     
     print(f"\nTraining completed. Results saved to {output_dir}")
     

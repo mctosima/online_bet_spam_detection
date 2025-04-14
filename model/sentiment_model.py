@@ -4,6 +4,7 @@ from transformers import AutoModel
 from typing import Dict, Tuple, Optional
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precision_score, recall_score
+from torchinfo import summary
 
 class BERTSentimentClassifier(nn.Module):
     """
@@ -248,3 +249,25 @@ class BERTSentimentClassifier(nn.Module):
         model.to(device)
         
         return model
+
+if __name__ == "__main__":
+    # Create a sample model instance
+    model = BERTSentimentClassifier()
+    
+    # Define sample input dimensions
+    batch_size = 8
+    seq_length = 128
+    
+    # Print model summary using torchinfo
+    summary_result = summary(
+        model,
+        input_data=[
+            torch.randint(0, 30522, (batch_size, seq_length)),  # Random input_ids
+            torch.ones((batch_size, seq_length), dtype=torch.long)  # Sample attention_mask
+        ],
+        col_names=["input_size", "output_size", "num_params", "trainable"],
+        verbose=1
+    )
+    
+    print("\nModel summary printed above. Sample forward pass with batch size:", batch_size)
+

@@ -530,15 +530,9 @@ def train_fold(fold, args, output_dir, device):
             f"fold_{fold}/lr_curve": wandb.Image(os.path.join(fold_output_dir, 'lr_curve.png'))
         })
     
-    # Load best model for final evaluation
-    best_model = BERTSentimentClassifier.load_model(
-        os.path.join(fold_output_dir, "best_model.pt"),
-        device
-    )
-    
-    # Final evaluation
+    # Use current model for final evaluation instead of loading best_model
     final_metrics = BERTSentimentClassifier.evaluate_model(
-        model=best_model,
+        model=model,  # Use current model state instead of trying to load a best_model
         dataloader=val_loader,
         criterion=criterion,
         device=device

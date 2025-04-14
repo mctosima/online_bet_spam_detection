@@ -6,6 +6,7 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from datetime import datetime
+import pytz  # Add this import for timezone support
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau
 from transformers import get_linear_schedule_with_warmup
@@ -48,7 +49,7 @@ def parse_args():
                         help='Batch size')
     parser.add_argument('--epochs', type=int, default=35,
                         help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=5e-5,
+    parser.add_argument('--lr', type=float, default=1e-6,
                         help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01,
                         help='Weight decay')
@@ -92,8 +93,9 @@ def create_output_dir(base_dir):
     # Create base directory if it doesn't exist
     os.makedirs(base_dir, exist_ok=True)
     
-    # Create timestamped directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Create timestamped directory with Indonesia timezone (UTC+7)
+    indonesia_tz = pytz.timezone('Asia/Jakarta')
+    timestamp = datetime.now(indonesia_tz).strftime("%Y%m%d_%H%M%S")
     output_dir = os.path.join(base_dir, f"run_{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
     
@@ -176,8 +178,21 @@ def manage_checkpoints(model, epoch, accuracy, fold_output_dir, max_checkpoints=
     checkpoint_name = f"epoch-{epoch+1:02d}_acc-{accuracy:.4f}.pt"
     checkpoint_path = os.path.join(checkpoints_dir, checkpoint_name)
     
-    # Save current model
-    model.save_model(checkpoint_path)
+    # Save current model - use torch.save instead of model.save_model
+    try:
+        # Save the full model
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'accuracy': accuracy,
+            'model_name': model.model_name if hasattr(model, 'model_name') else None,
+        }, checkpoint_path)
+    except Exception as e:
+        print(f"Error saving checkpoint: {e}")
+        return None
+        
+    # Log success
+    print(f"Successfully saved checkpoint to: {os.path.basename(checkpoint_path)}")
     
     # Get all existing checkpoints and their accuracies
     checkpoints = []
@@ -193,14 +208,14 @@ def manage_checkpoints(model, epoch, accuracy, fold_output_dir, max_checkpoints=
     # Sort checkpoints by accuracy (descending)
     checkpoints.sort(key=lambda x: x[1], reverse=True)
     
-    # Remove excess checkpoints (keep only top max_checkpoints)
-    if len(checkpoints) > max_checkpoints:
-        for cp_path, _ in checkpoints[max_checkpoints:]:
-            try:
-                os.remove(cp_path)
-                print(f"Removed checkpoint: {os.path.basename(cp_path)}")
-            except OSError as e:
-                print(f"Error removing checkpoint {cp_path}: {e}")
+    # # Remove excess checkpoints (keep only top max_checkpoints)
+    # if len(checkpoints) > max_checkpoints:
+    #     for cp_path, _ in checkpoints[max_checkpoints:]:
+    #         try:
+    #             os.remove(cp_path)
+    #             print(f"Removed checkpoint: {os.path.basename(cp_path)}")
+    #         except OSError as e:
+    #             print(f"Error removing checkpoint {cp_path}: {e}")
     
     # Return path to the current checkpoint
     return checkpoint_path
@@ -438,21 +453,8 @@ def train_fold(fold, args, output_dir, device):
             best_epoch = epoch
             patience_counter = 0
             
-            # Save best model
-            model.save_model(os.path.join(fold_output_dir, "best_model.pt"))
-            print(f"New best model saved (F1: {best_val_f1:.4f})")
-            
-            # Save confusion matrix
-            np.savetxt(
-                os.path.join(fold_output_dir, "confusion_matrix.csv"),
-                val_metrics['confusion_matrix'],
-                delimiter=","
-            )
-            
-            # Generate classification report
-            report = classification_report(all_labels, all_predictions, target_names=["Normal", "Spam"], output_dict=True)
-            with open(os.path.join(fold_output_dir, "classification_report.json"), 'w') as f:
-                json.dump(report, f, indent=4)
+            # Log improvement but don't save files
+            print(f"New best model found (F1: {best_val_f1:.4f})")
             
             # Log best metrics to wandb
             if args.use_wandb:
@@ -630,7 +632,9 @@ def main():
     
     # Initialize wandb
     if args.use_wandb:
-        timestamp = datetime.now().strftime('%Y%m%d-%H%M')
+        # Use Indonesia timezone (UTC+7) for the timestamp
+        indonesia_tz = pytz.timezone('Asia/Jakarta')
+        timestamp = datetime.now(indonesia_tz).strftime('%Y%m%d-%H%M')
         wandb_run_name = f"{timestamp}_"
         if args.run_name:
             wandb_run_name += args.run_name

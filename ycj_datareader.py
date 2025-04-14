@@ -28,7 +28,7 @@ class YouTubeCommentDataset(Dataset):
                  tokenizer_name="indobenchmark/indobert-base-p1",
                  apply_preprocessing=True,
                  random_state=42,
-                 folds_file="youtube_comment_folds.json"):
+                 folds_file="ycj_split.json"):
         """
         Initialize the YouTube Comment Dataset for spam detection
         

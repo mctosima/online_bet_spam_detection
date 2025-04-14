@@ -22,6 +22,9 @@ from ycj_datareader import YouTubeCommentDataset
 from model.sentiment_model import BERTSentimentClassifier
 from utils import check_set_gpu
 
+import nltk
+nltk.download('punkt')
+
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Train BERT for YouTube comment spam detection')

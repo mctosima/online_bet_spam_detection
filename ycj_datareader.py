@@ -11,9 +11,15 @@ import nltk
 from nltk.corpus import stopwords
 
 # Download NLTK resources
-nltk.data.find('tokenizers/punkt')
-nltk.data.find('corpora/stopwords')
-nltk.download('punkt_tab')
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/stopwords')
+    nltk.data.find('corpora/wordnet')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('punkt_tab')
+    nltk.download('stopwords')
+    nltk.download('wordnet')
 
 INDONESIAN_STOPWORDS = set(stopwords.words('indonesian'))
 

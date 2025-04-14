@@ -2,7 +2,7 @@
 
 # Set up variables
 GITHUB_USERNAME="mctosima"
-GITHUB_TOKEN="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"  # Replace with your actual token
+GITHUB_TOKEN="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"  # Replace with your actual token
 REPO_NAME="online_bet_spam_detection"
 REPO_URL="https://$GITHUB_USERNAME:$GITHUB_TOKEN@github.com/$GITHUB_USERNAME/$REPO_NAME.git"
 TEMP_DIR="temp_repo"

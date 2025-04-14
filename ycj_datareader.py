@@ -60,7 +60,8 @@ class YouTubeCommentDataset(Dataset):
         self.folds_file = folds_file
         
         # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        # self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer = AutoTokenizer.from_pretrained("./indobert-base-p1")
         
         # Load and process data
         print(f"Loading data from {file_path}...")

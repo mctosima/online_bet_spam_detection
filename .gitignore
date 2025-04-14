@@ -1,3 +1,5 @@
 /.DS_Store
 /.mypy_cache
 /.venv
+ycj_model_outputs/
+__pycache__/

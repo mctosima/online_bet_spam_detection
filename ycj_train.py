@@ -62,7 +62,7 @@ def parse_args():
                         help='Batch size')
     parser.add_argument('--epochs', type=int, default=35,
                         help='Number of epochs')
-    parser.add_argument('--lr', type=float, default=1e-6,
+    parser.add_argument('--lr', type=float, default=1e-5,
                         help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01,
                         help='Weight decay')
@@ -372,7 +372,7 @@ def train_fold(fold, args, output_dir, device):
     # Use trange for epoch progress tracking
     epochs_iter = trange(args.epochs, desc=f"Fold {fold+1}")
     for epoch in epochs_iter:
-        print(f"=== Epoch {epoch+1}/{args.epochs} ===")
+        print(f"\n=== Epoch {epoch+1}/{args.epochs} ===\n")
         # Store current learning rate
         current_lr = optimizer.param_groups[0]['lr']
         learning_rates.append(current_lr)

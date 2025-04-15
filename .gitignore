@@ -3,3 +3,4 @@
 /.venv
 ycj_model_outputs/
 __pycache__/
+ycj_model_outputs_lightweight/run_20250415_084454/fold_0/checkpoints/

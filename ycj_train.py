@@ -21,6 +21,7 @@ from utils import check_set_gpu
 # Import local modules
 from ycj_datareader import YouTubeCommentDataset
 from model.sentiment_model import BERTSentimentClassifier
+from model.lightweight_transformer import LightweightTransformer
 from utils import check_set_gpu
 
 import nltk
@@ -28,7 +29,7 @@ nltk.download('punkt')
 
 def parse_args():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Train BERT for YouTube comment spam detection')
+    parser = argparse.ArgumentParser(description='Train model for YouTube comment spam detection')
     
     # Data parameters
     parser.add_argument('--data_path', type=str, default='./data/youtube_chat_jogja_clean.csv', 
@@ -37,12 +38,24 @@ def parse_args():
                         help='Apply text preprocessing')
     
     # Model parameters
+    parser.add_argument('--model_type', type=str, choices=['bert', 'lightweight'], default='bert',
+                        help='Type of model to use (bert or lightweight)')
     parser.add_argument('--model_name', type=str, default='indobenchmark/indobert-base-p1',
-                        help='Pre-trained BERT model name')
+                        help='Pre-trained BERT model name (only for bert model_type)')
     parser.add_argument('--max_length', type=int, default=128,
                         help='Maximum sequence length')
     parser.add_argument('--dropout', type=float, default=0.2,
                         help='Dropout rate')
+    
+    # Lightweight model specific parameters
+    parser.add_argument('--embed_dim', type=int, default=256,
+                        help='Embedding dimension for lightweight model')
+    parser.add_argument('--num_heads', type=int, default=4,
+                        help='Number of attention heads for lightweight model')
+    parser.add_argument('--ff_dim', type=int, default=512,
+                        help='Feed-forward dimension for lightweight model')
+    parser.add_argument('--num_layers', type=int, default=3,
+                        help='Number of transformer layers for lightweight model')
     
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=32,
@@ -123,9 +136,10 @@ def get_dataloaders_for_fold(args, fold):
         n_folds=args.n_folds,
         split="train",
         max_length=args.max_length,
-        tokenizer_name=args.model_name,
+        tokenizer_name=args.model_name if args.model_type == 'bert' else 'bert-base-uncased',
         apply_preprocessing=args.preprocess,
-        random_state=args.seed
+        random_state=args.seed,
+        use_local_tokenizer=True
     )
     
     val_dataset = YouTubeCommentDataset(
@@ -134,9 +148,10 @@ def get_dataloaders_for_fold(args, fold):
         n_folds=args.n_folds,
         split="val",
         max_length=args.max_length,
-        tokenizer_name=args.model_name,
+        tokenizer_name=args.model_name if args.model_type == 'bert' else 'bert-base-uncased',
         apply_preprocessing=args.preprocess,
-        random_state=args.seed
+        random_state=args.seed,
+        use_local_tokenizer=True
     )
     
     # Create dataloaders
@@ -156,7 +171,7 @@ def get_dataloaders_for_fold(args, fold):
     
     return train_loader, val_loader, train_dataset
 
-def manage_checkpoints(model, epoch, accuracy, fold_output_dir, max_checkpoints=3):
+def manage_checkpoints(model, epoch, accuracy, fold_output_dir, max_checkpoints=3, best_f1=None):
     """
     Save model checkpoint and maintain only top N checkpoints based on accuracy.
     
@@ -166,9 +181,11 @@ def manage_checkpoints(model, epoch, accuracy, fold_output_dir, max_checkpoints=
         accuracy: Validation accuracy
         fold_output_dir: Output directory for the current fold
         max_checkpoints: Maximum number of checkpoints to keep
+        best_f1: Current best F1 score (to mark best checkpoint)
     
     Returns:
         checkpoint_path: Path to the saved checkpoint
+        is_best: Whether this checkpoint is the best so far
     """
     # Create checkpoints directory if it doesn't exist
     checkpoints_dir = os.path.join(fold_output_dir, "checkpoints")
@@ -189,7 +206,7 @@ def manage_checkpoints(model, epoch, accuracy, fold_output_dir, max_checkpoints=
         }, checkpoint_path)
     except Exception as e:
         print(f"Error saving checkpoint: {e}")
-        return None
+        return None, False
         
     # Log success
     print(f"Successfully saved checkpoint to: {os.path.basename(checkpoint_path)}")
@@ -217,25 +234,77 @@ def manage_checkpoints(model, epoch, accuracy, fold_output_dir, max_checkpoints=
     #         except OSError as e:
     #             print(f"Error removing checkpoint {cp_path}: {e}")
     
-    # Return path to the current checkpoint
-    return checkpoint_path
+    # Check if this is the best checkpoint (comparing with previous best if provided)
+    is_best = best_f1 is None or accuracy > best_f1
+    
+    # If this is the best checkpoint, create a symlink or copy named "best_model.pt"
+    if is_best:
+        best_model_path = os.path.join(checkpoints_dir, "best_model.pt")
+        try:
+            # If a previous best model exists, remove it
+            if os.path.exists(best_model_path):
+                os.remove(best_model_path)
+            
+            # Save a copy of the current checkpoint as best_model.pt
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'accuracy': accuracy,
+                'model_name': model.model_name if hasattr(model, 'model_name') else None,
+            }, best_model_path)
+            
+            print(f"Saved new best model: {os.path.basename(checkpoint_path)}")
+        except Exception as e:
+            print(f"Error creating best model reference: {e}")
+    
+    # Return path to the current checkpoint and whether it's the best
+    return checkpoint_path, is_best
+
+def create_model(args, device):
+    """
+    Create the appropriate model based on args
+    
+    Args:
+        args: Command line arguments
+        device: Device to place model on
+        
+    Returns:
+        Initialized model on the specified device
+    """
+    if args.model_type == 'bert':
+        model = BERTSentimentClassifier(
+            model_name=args.model_name,
+            num_classes=2,  # Binary classification: 0=normal, 1=spam
+            dropout_rate=args.dropout
+        )
+    else:  # lightweight
+        model = LightweightTransformer(
+            vocab_size=30522,  # Default vocab size for BERT tokenizer
+            max_seq_len=args.max_length,
+            embed_dim=args.embed_dim,
+            num_heads=args.num_heads,
+            ff_dim=args.ff_dim,
+            num_layers=args.num_layers,
+            num_classes=2,  # Binary classification
+            dropout_rate=args.dropout
+        )
+    
+    # Move model to device
+    model.to(device)
+    
+    return model
 
 def train_fold(fold, args, output_dir, device):
     """Train and evaluate model on a specific fold"""
     print(f"\n{'='*80}")
-    print(f"Training Fold {fold+1}/{args.n_folds}")
+    print(f"Training Fold {fold+1}/{args.n_folds} with {args.model_type} model")
     print(f"{'='*80}")
     
     # Get data loaders for this fold
     train_loader, val_loader, train_dataset = get_dataloaders_for_fold(args, fold)
     
     # Create model
-    model = BERTSentimentClassifier(
-        model_name=args.model_name,
-        num_classes=2,  # Binary classification: 0=normal, 1=spam
-        dropout_rate=args.dropout
-    )
-    model.to(device)
+    model = create_model(args, device)
     
     # Define optimizer
     optimizer = AdamW(
@@ -246,11 +315,17 @@ def train_fold(fold, args, output_dir, device):
     
     # Define scheduler
     total_steps = len(train_loader) * args.epochs
-    warmup_scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=total_steps // 10,  # 10% of steps for warmup
-        num_training_steps=total_steps
-    )
+    
+    # Different learning rate behavior based on model type
+    if args.model_type == 'bert':
+        warmup_scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=total_steps // 10,  # 10% of steps for warmup
+            num_training_steps=total_steps
+        )
+    else:
+        # For lightweight model, use a simpler scheduler or None
+        warmup_scheduler = None
     
     # Add ReduceLROnPlateau scheduler
     lr_scheduler = ReduceLROnPlateau(
@@ -268,6 +343,18 @@ def train_fold(fold, args, output_dir, device):
     else:
         criterion = nn.CrossEntropyLoss()
     
+    # Reference the appropriate Model class methods for training and evaluation
+    if args.model_type == 'bert':
+        train_method = BERTSentimentClassifier.train_model
+        eval_method = BERTSentimentClassifier.evaluate_model
+        compute_metrics = BERTSentimentClassifier.compute_metrics
+        model_class = BERTSentimentClassifier
+    else:
+        train_method = LightweightTransformer.train_model
+        eval_method = LightweightTransformer.evaluate_model
+        compute_metrics = LightweightTransformer.compute_metrics
+        model_class = LightweightTransformer
+        
     # Training loop
     best_val_f1 = 0
     best_epoch = 0
@@ -277,6 +364,7 @@ def train_fold(fold, args, output_dir, device):
     train_f1s = []
     val_f1s = []
     learning_rates = []
+    best_model_path = None
     
     fold_output_dir = os.path.join(output_dir, f"fold_{fold}")
     os.makedirs(fold_output_dir, exist_ok=True)
@@ -327,7 +415,7 @@ def train_fold(fold, args, output_dir, device):
         
         # Calculate train metrics
         train_loss = train_loss / len(train_loader)
-        train_accuracy, train_f1, train_precision, train_recall, train_macro_f1 = BERTSentimentClassifier.compute_metrics(all_labels, all_predictions, zero_division=1)
+        train_accuracy, train_f1, train_precision, train_recall, train_macro_f1 = compute_metrics(all_labels, all_predictions, zero_division=1)
         
         train_metrics = {
             'loss': train_loss,
@@ -372,7 +460,7 @@ def train_fold(fold, args, output_dir, device):
         
         # Calculate validation metrics
         val_loss = val_loss / len(val_loader)
-        val_accuracy, val_f1, val_precision, val_recall, val_macro_f1 = BERTSentimentClassifier.compute_metrics(all_labels, all_predictions, zero_division=1)
+        val_accuracy, val_f1, val_precision, val_recall, val_macro_f1 = compute_metrics(all_labels, all_predictions, zero_division=1)
         
         val_metrics = {
             'loss': val_loss,
@@ -409,8 +497,11 @@ def train_fold(fold, args, output_dir, device):
               f"Time: {val_time:.2f}s")
         print(f"Current learning rate: {current_lr}")
         
-        # Save checkpoint for this epoch
-        checkpoint_path = manage_checkpoints(model, epoch, val_metrics['accuracy'], fold_output_dir, max_checkpoints=3)
+        # Save checkpoint for this epoch, passing current best_val_f1 for comparison
+        checkpoint_path, is_best = manage_checkpoints(
+            model, epoch, val_metrics['accuracy'], fold_output_dir, 
+            max_checkpoints=3, best_f1=best_val_f1
+        )
         print(f"Saved checkpoint: {os.path.basename(checkpoint_path)}")
         
         # Step LR scheduler after validation
@@ -452,6 +543,7 @@ def train_fold(fold, args, output_dir, device):
             best_val_f1 = val_metrics['weighted_f1']
             best_epoch = epoch
             patience_counter = 0
+            best_model_path = os.path.join(fold_output_dir, "checkpoints", "best_model.pt")
             
             # Log improvement but don't save files
             print(f"New best model found (F1: {best_val_f1:.4f})")
@@ -530,13 +622,37 @@ def train_fold(fold, args, output_dir, device):
             f"fold_{fold}/lr_curve": wandb.Image(os.path.join(fold_output_dir, 'lr_curve.png'))
         })
     
-    # Use current model for final evaluation instead of loading best_model
-    final_metrics = BERTSentimentClassifier.evaluate_model(
-        model=model,  # Use current model state instead of trying to load a best_model
-        dataloader=val_loader,
-        criterion=criterion,
-        device=device
-    )
+    # Load the best model for final evaluation
+    print(f"Loading best model from {best_model_path} for final evaluation")
+    try:
+        checkpoint = torch.load(best_model_path, map_location=device)
+        
+        # Create a new model instance of the same type
+        best_model = create_model(args, device)
+        
+        # Load the saved weights
+        best_model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Use the best model for final evaluation
+        final_metrics = eval_method(
+            model=best_model,
+            dataloader=val_loader,
+            criterion=criterion,
+            device=device
+        )
+        
+        print(f"Final evaluation with best model (epoch {checkpoint['epoch']})")
+        print(f"Accuracy: {final_metrics['accuracy']:.4f}, F1: {final_metrics['weighted_f1']:.4f}")
+        
+    except Exception as e:
+        print(f"Error loading best model: {e}")
+        print("Using current model for final evaluation instead")
+        final_metrics = eval_method(
+            model=model,
+            dataloader=val_loader,
+            criterion=criterion,
+            device=device
+        )
     
     return final_metrics, best_val_f1
 
@@ -611,8 +727,9 @@ def main():
     # Set random seed
     set_seed(args.seed)
     
-    # Create output directory
-    output_dir = create_output_dir(args.output_dir)
+    # Create output directory - include model type in the directory name
+    model_type_dir = f"{args.output_dir}_{args.model_type}"
+    output_dir = create_output_dir(model_type_dir)
     print(f"Output directory: {output_dir}")
     
     # Extract run_name from output_dir for logging
@@ -624,12 +741,12 @@ def main():
     with open(os.path.join(output_dir, 'args.json'), 'w') as f:
         json.dump(vars(args), f, indent=2)
     
-    # Initialize wandb
+    # Initialize wandb with model type info
     if args.use_wandb:
         # Use Indonesia timezone (UTC+7) for the timestamp
         indonesia_tz = pytz.timezone('Asia/Jakarta')
         timestamp = datetime.now(indonesia_tz).strftime('%Y%m%d-%H%M')
-        wandb_run_name = f"{timestamp}_"
+        wandb_run_name = f"{timestamp}_{args.model_type}_"
         if args.run_name:
             wandb_run_name += args.run_name
         
@@ -712,7 +829,7 @@ def main():
     if args.use_wandb:
         wandb.save(log_file)
     
-    print(f"\nTraining completed. Results saved to {output_dir}")
+    print(f"\nTraining completed for {args.model_type} model. Results saved to {output_dir}")
     
     # Finish wandb run
     if args.use_wandb:

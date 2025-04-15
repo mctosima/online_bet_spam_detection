@@ -34,7 +34,8 @@ class YouTubeCommentDataset(Dataset):
                  tokenizer_name="indobenchmark/indobert-base-p1",
                  apply_preprocessing=True,
                  random_state=42,
-                 folds_file="ycj_split.json"):
+                 folds_file="ycj_split.json",
+                 use_local_tokenizer=True):
         """
         Initialize the YouTube Comment Dataset for spam detection
         
@@ -48,6 +49,7 @@ class YouTubeCommentDataset(Dataset):
             apply_preprocessing: Whether to apply text preprocessing
             random_state: Random seed for reproducibility
             folds_file: Path to save/load the fold indices
+            use_local_tokenizer: Whether to use local tokenizer or download from huggingface
         """
         self.file_path = file_path
         self.fold = fold
@@ -60,8 +62,12 @@ class YouTubeCommentDataset(Dataset):
         self.folds_file = folds_file
         
         # Initialize tokenizer
-        # self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        self.tokenizer = AutoTokenizer.from_pretrained("./indobert-base-p1")
+        if use_local_tokenizer and os.path.exists("./indobert-base-p1"):
+            print("Using local tokenizer")
+            self.tokenizer = AutoTokenizer.from_pretrained("./indobert-base-p1")
+        else:
+            print(f"Loading tokenizer from {tokenizer_name}")
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
         # Load and process data
         print(f"Loading data from {file_path}...")

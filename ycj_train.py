@@ -372,6 +372,7 @@ def train_fold(fold, args, output_dir, device):
     # Use trange for epoch progress tracking
     epochs_iter = trange(args.epochs, desc=f"Fold {fold+1}")
     for epoch in epochs_iter:
+        print(f"=== Epoch {epoch+1}/{args.epochs} ===")
         # Store current learning rate
         current_lr = optimizer.param_groups[0]['lr']
         learning_rates.append(current_lr)

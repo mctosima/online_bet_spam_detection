@@ -7,7 +7,7 @@ import string
 import random
 from sklearn.svm import SVC
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
+from sklearn.metrics import f1_score, accuracy_score, confusion_matrix, precision_score, recall_score, roc_auc_score
 from sklearn.metrics import classification_report
 from sklearn.pipeline import Pipeline
 import matplotlib.pyplot as plt
@@ -492,9 +492,12 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
                 train_data['processed_message'] = train_data['message'].apply(preprocess_text)
                 test_data['processed_message'] = test_data['message'].apply(preprocess_text)
                 
-                # Simulate multiple training epochs with different augmentations
+                # Store fold performance across epochs
                 fold_accuracies = []
+                fold_precisions = []
+                fold_recalls = []
                 fold_f1_scores = []
+                fold_auc_scores = []
                 
                 for epoch in range(num_epochs):
                     print(f"\nFold {fold_idx}, Epoch {epoch+1}/{num_epochs}")
@@ -531,17 +534,27 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
                     
                     # Calculate metrics
                     accuracy = accuracy_score(y_test, y_pred)
+                    precision = precision_score(y_test, y_pred, average='weighted', zero_division=0)
+                    recall = recall_score(y_test, y_pred, average='weighted', zero_division=0)
                     macro_f1 = f1_score(y_test, y_pred, average='macro')
                     weighted_f1 = f1_score(y_test, y_pred, average='weighted')
                     
-                    # Get per-class F1 and find best F1
-                    report = classification_report(y_test, y_pred, output_dict=True)
-                    class_f1s = {k: v['f1-score'] for k, v in report.items() if k.isdigit()}
-                    best_f1 = max(class_f1s.values()) if class_f1s else 0
+                    # Calculate AUC if applicable (binary classification)
+                    try:
+                        # Probability estimates for AUC
+                        y_prob = pipeline.predict_proba(X_test)[:, 1]
+                        auc = roc_auc_score(y_test, y_prob)
+                    except:
+                        # For multiclass or if probabilities can't be obtained
+                        auc = 0.0
+                        print("Warning: Could not calculate AUC score")
                     
-                    # Save epoch metrics
+                    # Save all metrics
                     fold_accuracies.append(accuracy)
+                    fold_precisions.append(precision)
+                    fold_recalls.append(recall)
                     fold_f1_scores.append(weighted_f1)
+                    fold_auc_scores.append(auc)
                     
                     # Confusion matrix for this epoch
                     cm = confusion_matrix(y_test, y_pred)
@@ -555,49 +568,60 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
                     plt.close()
                     
                     print(f"Epoch {epoch+1} results:")
-                    print(f"  Accuracy: {accuracy:.4f}")
-                    print(f"  Macro F1: {macro_f1:.4f}")
-                    print(f"  Weighted F1: {weighted_f1:.4f}")
-                    print(f"  Best F1: {best_f1:.4f}")
+                    print(f"  Accuracy:  {accuracy:.4f}")
+                    print(f"  Precision: {precision:.4f}")
+                    print(f"  Recall:    {recall:.4f}")
+                    print(f"  F1 Score:  {weighted_f1:.4f}")
+                    print(f"  AUC Score: {auc:.4f}")
                 
-                # Find the best epoch
+                # Find the best epoch based on F1 (you can change this criterion)
                 best_epoch_idx = np.argmax(fold_f1_scores)
                 best_epoch = best_epoch_idx + 1
                 best_accuracy = fold_accuracies[best_epoch_idx]
+                best_precision = fold_precisions[best_epoch_idx]
+                best_recall = fold_recalls[best_epoch_idx]
                 best_weighted_f1 = fold_f1_scores[best_epoch_idx]
+                best_auc = fold_auc_scores[best_epoch_idx]
                 
-                # Plot accuracy and F1 across epochs
-                plt.figure(figsize=(10, 6))
+                # Plot all metrics across epochs
+                plt.figure(figsize=(12, 8))
                 plt.plot(range(1, num_epochs+1), fold_accuracies, marker='o', label='Accuracy')
+                plt.plot(range(1, num_epochs+1), fold_precisions, marker='s', label='Precision')
+                plt.plot(range(1, num_epochs+1), fold_recalls, marker='^', label='Recall')
                 plt.plot(range(1, num_epochs+1), fold_f1_scores, marker='x', label='F1 Score')
+                plt.plot(range(1, num_epochs+1), fold_auc_scores, marker='*', label='AUC')
                 plt.axvline(x=best_epoch, color='r', linestyle='--', label=f'Best Epoch ({best_epoch})')
                 plt.xlabel('Epoch')
                 plt.ylabel('Score')
-                plt.title(f'Fold {fold_idx} - Performance Across Epochs')
+                plt.title(f'Fold {fold_idx} - Performance Metrics Across Epochs')
                 plt.legend()
                 plt.grid(True)
-                plt.savefig(f"{output_dir}/fold_{fold_idx}_epoch_performance.png")
+                plt.savefig(f"{output_dir}/fold_{fold_idx}_metrics_performance.png")
                 plt.close()
-                
-                # Store for final metrics - only consider predictions from best epoch
-                if epoch == best_epoch_idx:
-                    all_predictions.extend(y_pred)
-                    all_true_labels.extend(y_test)
                 
                 # Store results for this fold
                 results.append({
                     'fold': fold_idx,
                     'best_epoch': best_epoch,
                     'accuracy': best_accuracy,
+                    'precision': best_precision,
+                    'recall': best_recall,
                     'weighted_f1': best_weighted_f1,
+                    'auc': best_auc,
                     'accuracies': fold_accuracies,
-                    'f1_scores': fold_f1_scores
+                    'precisions': fold_precisions,
+                    'recalls': fold_recalls,
+                    'f1_scores': fold_f1_scores,
+                    'auc_scores': fold_auc_scores
                 })
                 
                 print(f"Fold {fold_idx} best results (Epoch {best_epoch}):")
-                print(f"  Accuracy: {best_accuracy:.4f}")
-                print(f"  Weighted F1: {best_weighted_f1:.4f}")
-        
+                print(f"  Accuracy:  {best_accuracy:.4f}")
+                print(f"  Precision: {best_precision:.4f}")
+                print(f"  Recall:    {best_recall:.4f}")
+                print(f"  F1 Score:  {best_weighted_f1:.4f}")
+                print(f"  AUC Score: {best_auc:.4f}")
+                
         # ...existing code for handling fold_indices as a list...
     
     # Check if we have any results
@@ -607,49 +631,88 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
     
     # Calculate final metrics on all predictions
     final_accuracy = accuracy_score(all_true_labels, all_predictions)
+    final_precision = precision_score(all_true_labels, all_predictions, average='weighted', zero_division=0)
+    final_recall = recall_score(all_true_labels, all_predictions, average='weighted', zero_division=0)
     final_macro_f1 = f1_score(all_true_labels, all_predictions, average='macro')
     final_weighted_f1 = f1_score(all_true_labels, all_predictions, average='weighted')
     
+    # Calculate AUC for final results if possible
+    try:
+        y_binary = np.array(all_true_labels)
+        y_pred_binary = np.array(all_predictions)
+        final_auc = roc_auc_score(y_binary, y_pred_binary)
+    except:
+        final_auc = 0.0
+        print("Warning: Could not calculate final AUC score")
+    
     # Final report
     final_report = classification_report(all_true_labels, all_predictions, output_dict=True)
-    class_f1s = {k: v['f1-score'] for k, v in final_report.items() if k.isdigit()}
-    final_best_f1 = max(class_f1s.values()) if class_f1s else 0
     
-    # Final confusion matrix
-    final_cm = confusion_matrix(all_true_labels, all_predictions)
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(final_cm, annot=True, fmt='d', cmap='Blues', cbar=False)
-    plt.title('Final Confusion Matrix (All Folds)')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-    plt.tight_layout()
-    plt.savefig(f"{output_dir}/final_confusion_matrix.png")
-    plt.close()
-    
-    # Add final results
+    # Add final results with all metrics
     results.append({
         'fold': 'Final',
         'accuracy': final_accuracy,
+        'precision': final_precision,
+        'recall': final_recall,
         'macro_f1': final_macro_f1,
         'weighted_f1': final_weighted_f1,
-        'best_f1': final_best_f1
+        'auc': final_auc
     })
     
-    # Save results to CSV
-    results_df = pd.DataFrame([{k:v for k,v in r.items() if k not in ['accuracies', 'f1_scores']} for r in results])
+    # Save results to CSV, including all metrics
+    results_df = pd.DataFrame([{k:v for k,v in r.items() if not k.endswith('s')} for r in results])
     results_df.to_csv(f"{output_dir}/svm_performance_results.csv", index=False)
+    
+    # Create a summary table with averages across folds (excluding the "Final" row)
+    fold_results = [r for r in results if r['fold'] != 'Final']
+    if fold_results:
+        avg_accuracy = np.mean([r['accuracy'] for r in fold_results])
+        avg_precision = np.mean([r['precision'] for r in fold_results])
+        avg_recall = np.mean([r['recall'] for r in fold_results])
+        avg_weighted_f1 = np.mean([r['weighted_f1'] for r in fold_results])
+        avg_auc = np.mean([r['auc'] for r in fold_results])
+        
+        # Create a summary DataFrame
+        summary_df = pd.DataFrame({
+            'Metric': ['Accuracy', 'Precision', 'Recall', 'F1 Score', 'AUC'],
+            'Average': [avg_accuracy, avg_precision, avg_recall, avg_weighted_f1, avg_auc],
+            'Final': [final_accuracy, final_precision, final_recall, final_weighted_f1, final_auc]
+        })
+        summary_df.to_csv(f"{output_dir}/svm_summary_metrics.csv", index=False)
     
     # Save final detailed report
     final_report_df = pd.DataFrame(final_report).transpose()
     final_report_df.to_csv(f"{output_dir}/final_classification_report.csv")
     
+    # Plot summary of all metrics
+    metrics = ['Accuracy', 'Precision', 'Recall', 'F1 Score', 'AUC']
+    values = [final_accuracy, final_precision, final_recall, final_weighted_f1, final_auc]
+    
+    plt.figure(figsize=(10, 6))
+    plt.bar(metrics, values, color=['blue', 'green', 'red', 'purple', 'orange'])
+    plt.ylim(0, 1.0)
+    plt.xlabel('Metrics')
+    plt.ylabel('Score')
+    plt.title('Final Performance Metrics')
+    
+    # Add value labels on top of bars
+    for i, v in enumerate(values):
+        plt.text(i, v + 0.02, f'{v:.4f}', ha='center')
+    
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/final_metrics_summary.png")
+    plt.close()
+    
     elapsed_time = time.time() - start_time
     print(f"\nModel training and evaluation completed in {elapsed_time:.2f} seconds")
-    print(f"Final results:")
-    print(f"  Accuracy: {final_accuracy:.4f}")
-    print(f"  Macro F1: {final_macro_f1:.4f}")
-    print(f"  Weighted F1: {final_weighted_f1:.4f}")
-    print(f"  Best F1: {final_best_f1:.4f}")
+    print(f"\nFINAL METRICS SUMMARY:")
+    print(f"{'='*50}")
+    print(f"  Accuracy:  {final_accuracy:.4f}")
+    print(f"  Precision: {final_precision:.4f}")
+    print(f"  Recall:    {final_recall:.4f}")
+    print(f"  F1 Score:  {final_weighted_f1:.4f}")
+    print(f"  AUC Score: {final_auc:.4f}")
+    print(f"{'='*50}")
     print(f"All results and reports saved to {output_dir}/")
 
 if __name__ == "__main__":

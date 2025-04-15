@@ -21,7 +21,7 @@ source .venv/bin/activate
 
 # Install required packages
 echo "Installing required Python packages..."
-uv pip install numpy pandas matplotlib scikit-learn nltk wandb transformers openpyxl pytz torch torchinfo
+uv pip install numpy pandas matplotlib scikit-learn seaborn nltk wandb transformers openpyxl pytz torch torchinfo
 
 # Set up Weights & Biases
 echo "Setting up Weights & Biases..."

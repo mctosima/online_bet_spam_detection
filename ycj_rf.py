@@ -5,7 +5,7 @@ import os
 import re
 import string
 import random
-from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import f1_score, accuracy_score, confusion_matrix
 from sklearn.metrics import classification_report
@@ -96,6 +96,7 @@ class TextAugmenter:
         else:
             self.stopwords = set(stopwords.words('english'))
             
+    # ... existing methods from TextAugmenter class ...
     def get_synonyms(self, word):
         """Get synonyms for a word (simplified for Indonesian)"""
         synonyms = []
@@ -212,19 +213,7 @@ class TextAugmenter:
         return new_words
     
     def cascaded_augmentation(self, text):
-        """
-        Apply multiple augmentation techniques in sequence:
-        1. Synonym replacement
-        2. Random deletion
-        3. Random swap
-        4. Random insertion
-        
-        Args:
-            text: Text to augment
-            
-        Returns:
-            Augmented text after applying all techniques in sequence
-        """
+        """Apply multiple augmentation techniques in sequence"""
         # Tokenize text
         words = word_tokenize(text)
         
@@ -232,34 +221,18 @@ class TextAugmenter:
         if len(words) < 3:
             return text
         
-        # 1. Apply synonym replacement (10-15% of words)
+        # Apply sequence of augmentations
         n_words = max(1, int(len(words) * random.uniform(0.1, 0.15)))
         words = self.synonym_replacement(words, n_words)
-        
-        # 2. Apply random deletion (with 10% probability)
         words = self.random_deletion(words, p_delete=0.1)
-        
-        # 3. Apply random swap (1 swap)
         words = self.random_swap(words, n_swaps=1)
-        
-        # 4. Apply random insertion (1 insert)
         words = self.random_insertion(words, n_inserts=1)
         
         # Rebuild text
         return ' '.join(words)
     
     def augment(self, text, method='random'):
-        """
-        Apply text augmentation
-        
-        Args:
-            text: Text to augment
-            method: Augmentation method ('random', 'synonym', 'delete', 'swap', 
-                    'insert', 'cascaded', or 'none')
-        
-        Returns:
-            Augmented text
-        """
+        """Apply text augmentation"""
         # Decide whether to augment
         if method == 'none' or random.random() > self.p_augment:
             return text
@@ -275,55 +248,33 @@ class TextAugmenter:
         if method == 'random':
             method = random.choice(['synonym', 'delete', 'swap', 'insert', 'cascaded'])
         
-        # Apply selected augmentation method
+        # Apply selected method
         if method == 'synonym':
-            # Replace 10-20% of words with synonyms
             n_words = max(1, int(len(words) * random.uniform(0.1, 0.2)))
             words = self.synonym_replacement(words, n_words)
-            return ' '.join(words)
         elif method == 'delete':
-            # Delete words with 10-20% probability
             p_delete = random.uniform(0.1, 0.2)
             words = self.random_deletion(words, p_delete)
-            return ' '.join(words)
         elif method == 'swap':
-            # Swap 1-2 pairs of words
             n_swaps = random.randint(1, 2)
             words = self.random_swap(words, n_swaps)
-            return ' '.join(words)
         elif method == 'insert':
-            # Insert 1-2 synonyms
             n_inserts = random.randint(1, 2)
             words = self.random_insertion(words, n_inserts)
-            return ' '.join(words)
         elif method == 'cascaded':
-            # Apply cascaded augmentation (multiple techniques in sequence)
             return self.cascaded_augmentation(text)
         
-        # Default return (shouldn't reach here)
-        return text
-        
+        return ' '.join(words)
+
 def create_augmented_data(data, augmenter, method='random', augment_ratio=1.0, current_epoch=0):
-    """
-    Create augmented data from original dataset
-    
-    Args:
-        data: DataFrame containing original data
-        augmenter: TextAugmenter instance
-        method: Augmentation method
-        augment_ratio: Ratio of samples to augment (1.0 = all)
-        current_epoch: Current epoch number (for epoch-aware augmentation)
-    
-    Returns:
-        DataFrame with original and augmented data
-    """
+    """Create augmented data from original dataset"""
     # Make a copy to avoid modifying the original
     data_copy = data.copy()
     
     # Determine how many samples to augment
     n_augment = int(len(data) * augment_ratio)
     
-    # Use epoch as part of the random seed to get different augmentations per epoch
+    # Use epoch as part of the random seed
     epoch_seed = 42 + current_epoch
     np.random.seed(epoch_seed)
     
@@ -342,9 +293,8 @@ def create_augmented_data(data, augmenter, method='random', augment_ratio=1.0, c
         sample_epoch_seed = hash(str(idx) + str(current_epoch)) % 10000
         random.seed(sample_epoch_seed)
         
-        # Choose augmentation method dynamically if set to 'random'
+        # Choose augmentation method dynamically
         if method == 'random':
-            # Change available methods based on epoch to create diversity
             epoch_mod = current_epoch % 5
             if epoch_mod == 0:
                 aug_method = random.choice(['synonym', 'delete'])
@@ -393,7 +343,7 @@ def create_augmented_data(data, augmenter, method='random', augment_ratio=1.0, c
 
 def create_output_folder():
     """Create output folder if it doesn't exist"""
-    output_dir = "ycj_model_outputs_svm"
+    output_dir = "ycj_model_outputs_rf"  # Changed from SVM to RF
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     return output_dir
@@ -408,6 +358,31 @@ def plot_confusion_matrix(cm, fold, output_dir):
     plt.tight_layout()
     plt.savefig(f"{output_dir}/confusion_matrix_fold_{fold}.png")
     plt.close()
+
+def plot_feature_importance(model, feature_names, output_dir, fold):
+    """Plot feature importance for Random Forest"""
+    if hasattr(model, 'feature_importances_'):
+        # Get feature importances
+        importances = model.feature_importances_
+        
+        # Sort feature importances in descending order
+        indices = np.argsort(importances)[::-1]
+        
+        # Get the top 20 features or all if less than 20
+        n_features = min(20, len(importances))
+        top_indices = indices[:n_features]
+        top_importances = importances[top_indices]
+        top_features = [feature_names[i] for i in top_indices]
+        
+        # Plot
+        plt.figure(figsize=(10, 8))
+        plt.title(f'Top {n_features} Feature Importances - Fold {fold}')
+        plt.barh(range(n_features), top_importances, align='center')
+        plt.yticks(range(n_features), top_features)
+        plt.xlabel('Relative Importance')
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/feature_importance_fold_{fold}.png")
+        plt.close()
 
 def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
     # Load dataset
@@ -448,7 +423,7 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
         if isinstance(fold_indices, dict):
             print(f"Fold indices keys: {fold_indices.keys()}")
             
-            # Fix: Include keys that start with 'fold_' 
+            # Include all keys in fold_indices
             fold_keys = sorted([k for k in fold_indices.keys()])
             print(f"Processing {len(fold_keys)} folds")
             
@@ -492,14 +467,14 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
                 train_data['processed_message'] = train_data['message'].apply(preprocess_text)
                 test_data['processed_message'] = test_data['message'].apply(preprocess_text)
                 
-                # Simulate multiple training epochs with different augmentations
+                # Store fold performance across epochs
                 fold_accuracies = []
                 fold_f1_scores = []
                 
                 for epoch in range(num_epochs):
                     print(f"\nFold {fold_idx}, Epoch {epoch+1}/{num_epochs}")
                     
-                    # Augment training data if requested, with epoch-awareness
+                    # Augment training data if requested
                     if augmenter is not None:
                         epoch_train_data = create_augmented_data(
                             train_data, 
@@ -516,11 +491,16 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
                     X_test = test_data['processed_message']
                     y_test = test_data['label']
                     
-                    # Create pipeline with TF-IDF and SVM
-                    print(f"Training SVM model (Epoch {epoch+1})...")
+                    # Create pipeline with TF-IDF and Random Forest
+                    print(f"Training Random Forest model (Epoch {epoch+1})...")
                     pipeline = Pipeline([
                         ('tfidf', TfidfVectorizer(max_features=10)),
-                        ('svm', SVC(kernel='linear', C=1.0, probability=True))
+                        ('rf', RandomForestClassifier(
+                            n_estimators=100, 
+                            max_depth=None,
+                            min_samples_split=2,
+                            random_state=42+epoch,
+                            n_jobs=-1))
                     ])
                     
                     # Train model
@@ -542,6 +522,17 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
                     # Save epoch metrics
                     fold_accuracies.append(accuracy)
                     fold_f1_scores.append(weighted_f1)
+                    
+                    # Try to plot feature importances if available
+                    tfidf_vectorizer = pipeline.named_steps['tfidf']
+                    rf_classifier = pipeline.named_steps['rf']
+                    
+                    # Plot feature importance
+                    try:
+                        feature_names = np.array(tfidf_vectorizer.get_feature_names_out())
+                        plot_feature_importance(rf_classifier, feature_names, output_dir, f"{fold_idx}_epoch_{epoch+1}")
+                    except:
+                        print("Could not plot feature importance (likely due to pipeline structure)")
                     
                     # Confusion matrix for this epoch
                     cm = confusion_matrix(y_test, y_pred)
@@ -598,7 +589,17 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
                 print(f"  Accuracy: {best_accuracy:.4f}")
                 print(f"  Weighted F1: {best_weighted_f1:.4f}")
         
-        # ...existing code for handling fold_indices as a list...
+        # Handle list structure if needed (same as in SVM code)
+        elif isinstance(fold_indices, list):
+            print(f"Processing {len(fold_indices)} folds")
+            # ... similar processing for list structure ...
+        
+        else:
+            print(f"Error: Unrecognized structure for fold_indices: {type(fold_indices)}")
+            return
+    else:
+        print("Error: Could not find 'fold_indices' in the split data")
+        return
     
     # Check if we have any results
     if not all_predictions:
@@ -637,7 +638,7 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
     
     # Save results to CSV
     results_df = pd.DataFrame([{k:v for k,v in r.items() if k not in ['accuracies', 'f1_scores']} for r in results])
-    results_df.to_csv(f"{output_dir}/svm_performance_results.csv", index=False)
+    results_df.to_csv(f"{output_dir}/rf_performance_results.csv", index=False)
     
     # Save final detailed report
     final_report_df = pd.DataFrame(final_report).transpose()
@@ -655,9 +656,9 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Train SVM model with data augmentation')
+    parser = argparse.ArgumentParser(description='Train Random Forest model with data augmentation')
     parser.add_argument('--augmentation', type=str, default='none',
-                        choices=['none', 'random', 'synonym', 'delete', 'swap', 'insert', 'backtranslation', 'cascaded'],
+                        choices=['none', 'random', 'synonym', 'delete', 'swap', 'insert', 'cascaded'],
                         help='Type of text augmentation to use')
     parser.add_argument('--p_augment', type=float, default=0.5,
                         help='Probability of applying augmentation to a sample')
@@ -665,6 +666,10 @@ if __name__ == "__main__":
                         help='Ratio of training data to augment (1.0 = all samples)')
     parser.add_argument('--num_epochs', type=int, default=5,
                         help='Number of epochs to train with different augmentations')
+    parser.add_argument('--n_estimators', type=int, default=100,
+                        help='Number of trees in the random forest')
+    parser.add_argument('--max_features', type=int, default=5000,
+                        help='Maximum number of features for TF-IDF vectorizer')
     
     args = parser.parse_args()
     

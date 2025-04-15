@@ -483,6 +483,76 @@ class YouTubeCommentDataset(Dataset):
         # Reset random seed based on epoch to ensure different augmentations
         random.seed(self.random_state + epoch)
     
+    def limit_samples(self, max_samples):
+        """
+        Limit the dataset to a maximum number of samples.
+        Useful for preview/debugging mode.
+        
+        Args:
+            max_samples: Maximum number of samples to keep
+        """
+        # Check if we have a valid dataset
+        if not hasattr(self, 'examples') or not self.examples:
+            print("Warning: Dataset has no examples or examples attribute")
+            return
+            
+        if max_samples >= len(self.examples):
+            print(f"Not limiting samples - requested {max_samples}, but only have {len(self.examples)}")
+            return
+            
+        # Get the current labels
+        labels = [example.label for example in self.examples]
+        indices = list(range(len(self.examples)))
+        
+        # Try to maintain class distribution if possible
+        unique_labels = set(labels)
+        
+        if len(unique_labels) > 1:
+            # Stratified sampling
+            samples_per_class = {}
+            indices_per_class = {}
+            
+            # Count samples per class and collect indices
+            for i, label in enumerate(labels):
+                if label not in samples_per_class:
+                    samples_per_class[label] = 0
+                    indices_per_class[label] = []
+                samples_per_class[label] += 1
+                indices_per_class[label].append(i)
+            
+            # Calculate proportional allocation
+            total_samples = len(labels)
+            selected_indices = []
+            
+            for label in unique_labels:
+                # Calculate how many samples to take from this class
+                ratio = samples_per_class[label] / total_samples
+                n_samples = max(1, int(max_samples * ratio))
+                class_indices = indices_per_class[label]
+                
+                # Randomly select indices from this class
+                if len(class_indices) > n_samples:
+                    selected = np.random.choice(class_indices, size=n_samples, replace=False)
+                    selected_indices.extend(selected)
+                else:
+                    selected_indices.extend(class_indices)
+            
+            # If we didn't get enough samples, add more randomly
+            if len(selected_indices) < max_samples:
+                remaining = max_samples - len(selected_indices)
+                eligible = [i for i in indices if i not in selected_indices]
+                if eligible:
+                    additional = np.random.choice(eligible, size=min(remaining, len(eligible)), replace=False)
+                    selected_indices.extend(additional)
+        else:
+            # If only one class, just take random samples
+            selected_indices = np.random.choice(indices, size=min(max_samples, len(indices)), replace=False)
+        
+        # Create a new subset of examples
+        self.examples = [self.examples[i] for i in selected_indices]
+        
+        print(f"Limited dataset to {len(self.examples)} samples for preview mode")
+    
     def __len__(self):
         """Return the number of samples in the dataset"""
         return len(self.indices)

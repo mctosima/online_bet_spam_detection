@@ -109,6 +109,16 @@ def parse_args():
     parser.add_argument('--run_name', type=str, default=None,
                        help='Additional name for the wandb run')
     
+    # Preview mode for quick testing
+    parser.add_argument('--preview_mode', action='store_true',
+                        help='Run in preview mode with reduced dataset size and epochs')
+    parser.add_argument('--preview_samples', type=int, default=100,
+                        help='Number of samples to use in preview mode')
+    parser.add_argument('--preview_epochs', type=int, default=2,
+                        help='Number of epochs to run in preview mode')
+    parser.add_argument('--preview_folds', type=int, default=2,
+                        help='Number of folds to run in preview mode')
+    
     return parser.parse_args()
 
 def set_seed(seed):
@@ -454,8 +464,32 @@ def train_fold(fold, args, output_dir, device):
     fold_output_dir = os.path.join(output_dir, f"fold_{fold}")
     os.makedirs(fold_output_dir, exist_ok=True)
     
-    # Use trange for epoch progress tracking
-    epochs_iter = trange(args.epochs, desc=f"Fold {fold+1}")
+    # Apply preview mode if enabled
+    if args.preview_mode:
+        print(f"\n🔍 PREVIEW MODE ENABLED - Using only {args.preview_samples} samples and {args.preview_epochs} epochs")
+        # Limit the number of batches to process
+        try:
+            if hasattr(train_loader.dataset, 'limit_samples'):
+                train_loader.dataset.limit_samples(args.preview_samples)
+            else:
+                print("Warning: Dataset doesn't support limiting samples directly.")
+                print("Will limit batches during training instead.")
+                
+            if hasattr(val_loader.dataset, 'limit_samples'):
+                val_loader.dataset.limit_samples(args.preview_samples // 5)  # Smaller validation set
+            
+        except Exception as e:
+            print(f"Warning: Could not limit samples: {e}")
+            print("Will limit batches during training instead.")
+        
+        # Override epochs
+        original_epochs = args.epochs
+        args.epochs = args.preview_epochs
+        epochs_iter = trange(args.epochs, desc=f"Fold {fold+1} (Preview)")
+    else:
+        epochs_iter = trange(args.epochs, desc=f"Fold {fold+1}")
+    
+    # Training loop with batch limiting for preview mode
     for epoch in epochs_iter:
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===\n")
         
@@ -490,7 +524,19 @@ def train_fold(fold, args, output_dir, device):
         
         # Create progress bar for training steps
         train_iter = tqdm(train_loader, desc=f"Training", leave=False)
-        for batch in train_iter:
+        
+        # If in preview mode and couldn't limit samples directly, limit the batches
+        batch_limit = None
+        if args.preview_mode and not hasattr(train_loader.dataset, 'limit_samples'):
+            batch_limit = max(1, args.preview_samples // args.batch_size)
+            print(f"Preview mode: processing only {batch_limit} training batches")
+        
+        for batch_idx, batch in enumerate(train_iter):
+            # In preview mode, check if we should stop processing batches
+            if batch_limit is not None and batch_idx >= batch_limit:
+                break
+                
+            # Normal batch processing
             # Move batch to device
             input_ids = batch['input_ids'].to(device)
             labels = batch['labels'].to(device)
@@ -546,8 +592,20 @@ def train_fold(fold, args, output_dir, device):
         
         # Create progress bar for validation steps
         val_iter = tqdm(val_loader, desc=f"Validation", leave=False)
+        
+        # If in preview mode and couldn't limit validation samples directly, limit the batches
+        val_batch_limit = None
+        if args.preview_mode and not hasattr(val_loader.dataset, 'limit_samples'):
+            val_batch_limit = max(1, (args.preview_samples // 5) // args.batch_size)
+            print(f"Preview mode: processing only {val_batch_limit} validation batches")
+            
         with torch.no_grad():
-            for batch in val_iter:
+            for batch_idx, batch in enumerate(val_iter):
+                # In preview mode, check if we should stop processing batches
+                if val_batch_limit is not None and batch_idx >= val_batch_limit:
+                    break
+                    
+                # Normal batch processing
                 input_ids = batch['input_ids'].to(device)
                 labels = batch['labels'].to(device)
                 
@@ -735,7 +793,7 @@ def train_fold(fold, args, output_dir, device):
             print(f"Early stopping triggered after epoch {epoch+1}")
             break
     
-    # Save training history
+    # Save training history - use serialize_for_json to handle NumPy arrays
     history = {
         'train_loss': train_losses,
         'val_loss': val_losses,
@@ -747,8 +805,11 @@ def train_fold(fold, args, output_dir, device):
         'best_metrics': best_metrics
     }
     
+    # Properly serialize for JSON
+    serialized_history = serialize_for_json(history)
+    
     with open(os.path.join(fold_output_dir, "training_history.json"), "w") as f:
-        json.dump(history, f)
+        json.dump(serialized_history, f, indent=2)
     
     # Create plots
     plot_training_metrics(train_losses, val_losses, 'loss', os.path.join(fold_output_dir, 'loss_curve.png'))
@@ -809,6 +870,10 @@ def train_fold(fold, args, output_dir, device):
             device=device
         )
     
+    # If in preview mode, restore original epochs setting
+    if args.preview_mode:
+        args.epochs = original_epochs
+    
     return final_metrics, best_val_f1, best_metrics
 
 # Add a utility function to safely format metric values
@@ -818,6 +883,29 @@ def format_metric_value(value):
         return "N/A"
     else:
         return f"{value:.4f}"
+
+# Add a utility function to convert NumPy arrays to Python types for JSON serialization
+def serialize_for_json(obj):
+    """
+    Convert NumPy arrays and other non-serializable objects to Python types
+    for JSON serialization.
+    """
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, dict):
+        return {k: serialize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [serialize_for_json(item) for item in obj]
+    elif hasattr(obj, 'tolist'):
+        return obj.tolist()
+    else:
+        return obj
 
 def log_run_summary(output_dir, run_name, fold_results, best_f1_scores, best_epochs, best_metrics_list):
     """
@@ -952,13 +1040,24 @@ def main():
     device = check_set_gpu()
     print(f"Using device: {device}")
     
+    # In preview mode, use only a limited number of folds
+    if args.preview_mode:
+        print(f"\n🔍 PREVIEW MODE ACTIVE - Using only {args.preview_folds} folds for quick testing")
+        n_folds = min(args.preview_folds, args.n_folds)
+        print(f"Preview configuration:")
+        print(f"  - Samples per fold: {args.preview_samples}")
+        print(f"  - Epochs per fold: {args.preview_epochs}")
+        print(f"  - Number of folds: {n_folds}")
+    else:
+        n_folds = args.n_folds
+    
     # Cross-validation
     fold_results = []
     best_f1_scores = []
     best_epochs = []
     best_metrics_list = []  # Store best metrics from each fold
     
-    for fold in range(args.n_folds):
+    for fold in range(n_folds):  # Use n_folds instead of args.n_folds
         fold_metrics, best_val_f1, best_metrics = train_fold(fold, args, output_dir, device)
         fold_results.append(fold_metrics)
         best_f1_scores.append(best_val_f1)
@@ -1020,16 +1119,14 @@ def main():
             "final/avg_best_f1": avg_best_f1
         })
     
-    # Save cross-validation results
+    # Save cross-validation results - serialize properly
     cv_results = {
         'fold_metrics': [
-            {k: v.tolist() if isinstance(v, np.ndarray) else v 
-             for k, v in metrics.items()}
+            {k: v for k, v in metrics.items() if k != 'confusion_matrix'}
             for metrics in fold_results
         ],
         'best_metrics': [
-            {k: v.tolist() if isinstance(v, np.ndarray) else v 
-             for k, v in metrics.items()}
+            {k: v for k, v in metrics.items() if k != 'confusion_matrix'}
             for metrics in best_metrics_list
         ],
         'best_f1_scores': best_f1_scores,
@@ -1043,8 +1140,11 @@ def main():
         'avg_best_f1': avg_best_f1
     }
     
+    # Properly serialize for JSON
+    serialized_results = serialize_for_json(cv_results)
+    
     with open(os.path.join(output_dir, 'cv_results.json'), 'w') as f:
-        json.dump(cv_results, f, indent=2)
+        json.dump(serialized_results, f, indent=2)
     
     # Create and save run summary
     log_file = log_run_summary(output_dir, run_name, fold_results, best_f1_scores, best_epochs, best_metrics_list)

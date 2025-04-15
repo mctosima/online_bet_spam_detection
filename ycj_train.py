@@ -66,7 +66,7 @@ def parse_args():
                         help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01,
                         help='Weight decay')
-    parser.add_argument('--patience', type=int, default=5,
+    parser.add_argument('--patience', type=int, default=6,
                         help='Early stopping patience')
     parser.add_argument('--lr_patience', type=int, default=2,
                         help='Learning rate scheduler patience')

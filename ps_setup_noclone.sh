@@ -7,7 +7,7 @@ REPO_NAME="online_bet_spam_detection"
 REPO_URL="https://$GITHUB_USERNAME:$GITHUB_TOKEN@github.com/$GITHUB_USERNAME/$REPO_NAME.git"
 WANDB_API_KEY="48c4d7778a27bdc532d7020d8ea71a12283d00c9"  # Replace with your actual W&B API key
 
-echo "=== Starting GPU Platform Environment Setup ==="
+echo "=== Starting Environment Setup ==="
 
 # Repository update logic
 echo "=== Updating Repository ==="
@@ -56,11 +56,7 @@ source .venv/bin/activate
 
 # Install required packages (with specific versions optimized for GPU)
 echo "Installing required Python packages..."
-uv pip install numpy pandas matplotlib scikit-learn seaborn nltk wandb transformers openpyxl pytz torch torchvision torchaudio torchinfo --index-url https://download.pytorch.org/whl/cu118
-
-# Check if GPU is available
-echo "Checking for GPU availability..."
-python -c "import torch; print('CUDA Available: ' + str(torch.cuda.is_available())); print('GPU Device: ' + str(torch.cuda.get_device_name(0)) if torch.cuda.is_available() else 'No GPU detected')"
+uv pip install numpy pandas matplotlib scikit-learn seaborn nltk wandb transformers openpyxl pytz torch torchinfo
 
 # Set up Weights & Biases
 echo "Setting up Weights & Biases..."

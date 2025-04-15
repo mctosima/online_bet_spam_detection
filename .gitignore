@@ -6,3 +6,4 @@ __pycache__/
 ycj_model_outputs_lightweight
 saved_weight
 ycj_model_outputs_svm/
+ycj_model_outputs_lightweight_aug_cascaded/

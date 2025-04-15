@@ -38,7 +38,7 @@ def parse_args():
                         help='Apply text preprocessing')
     
     # Model parameters
-    parser.add_argument('--model_type', type=str, choices=['bert', 'lightweight'], default='bert',
+    parser.add_argument('--model_type', type=str, choices=['bert', 'lightweight'], default='lightweight',
                         help='Type of model to use (bert or lightweight)')
     parser.add_argument('--model_name', type=str, default='indobenchmark/indobert-base-p1',
                         help='Pre-trained BERT model name (only for bert model_type)')
@@ -76,6 +76,13 @@ def parse_args():
                         help='Number of cross-validation folds')
     parser.add_argument('--use_class_weights', action='store_true',
                         help='Use class weights for loss function')
+    
+    # Augmentation parameters
+    parser.add_argument('--augmentation', type=str, default='none',
+                        choices=['none', 'random', 'synonym', 'delete', 'swap', 'insert', 'backtranslation', 'cascaded'],
+                        help='Type of text augmentation to use')
+    parser.add_argument('--p_augment', type=float, default=0.5,
+                        help='Probability of applying augmentation to a sample')
     
     # Output parameters
     parser.add_argument('--output_dir', type=str, default='ycj_model_outputs',
@@ -127,7 +134,7 @@ def plot_training_metrics(train_metrics, val_metrics, metric_name, output_path):
     plt.savefig(output_path)
     plt.close()
 
-def get_dataloaders_for_fold(args, fold):
+def get_dataloaders_for_fold(args, fold, current_epoch=0):
     """Create train and validation datasets/dataloaders for the specified fold"""
     # Create datasets
     train_dataset = YouTubeCommentDataset(
@@ -139,7 +146,10 @@ def get_dataloaders_for_fold(args, fold):
         tokenizer_name=args.model_name if args.model_type == 'bert' else 'bert-base-uncased',
         apply_preprocessing=args.preprocess,
         random_state=args.seed,
-        use_local_tokenizer=True
+        use_local_tokenizer=True,
+        augmentation=args.augmentation,
+        p_augment=args.p_augment,
+        current_epoch=current_epoch
     )
     
     val_dataset = YouTubeCommentDataset(
@@ -151,7 +161,8 @@ def get_dataloaders_for_fold(args, fold):
         tokenizer_name=args.model_name if args.model_type == 'bert' else 'bert-base-uncased',
         apply_preprocessing=args.preprocess,
         random_state=args.seed,
-        use_local_tokenizer=True
+        use_local_tokenizer=True,
+        augmentation='none'  # Never augment validation data
     )
     
     # Create dataloaders
@@ -300,8 +311,8 @@ def train_fold(fold, args, output_dir, device):
     print(f"Training Fold {fold+1}/{args.n_folds} with {args.model_type} model")
     print(f"{'='*80}")
     
-    # Get data loaders for this fold
-    train_loader, val_loader, train_dataset = get_dataloaders_for_fold(args, fold)
+    # Get data loaders for this fold with epoch 0
+    train_loader, val_loader, train_dataset = get_dataloaders_for_fold(args, fold, current_epoch=0)
     
     # Create model
     model = create_model(args, device)
@@ -373,6 +384,25 @@ def train_fold(fold, args, output_dir, device):
     epochs_iter = trange(args.epochs, desc=f"Fold {fold+1}")
     for epoch in epochs_iter:
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===\n")
+        
+        # Update dataset with current epoch for dynamic augmentation
+        train_dataset.set_epoch(epoch)
+        
+        # Recreate dataloader for train set with updated epoch (optional)
+        # If your implementation changes batches due to augmentation, you may want to recreate the dataloader
+        # Otherwise, just setting the epoch is sufficient
+        if args.augmentation != 'none':
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=0
+            )
+        
+        # Log info about epoch-aware augmentation
+        if args.augmentation != 'none':
+            print(f"Using epoch-aware augmentation (epoch {epoch+1})")
+        
         # Store current learning rate
         current_lr = optimizer.param_groups[0]['lr']
         learning_rates.append(current_lr)
@@ -728,9 +758,11 @@ def main():
     # Set random seed
     set_seed(args.seed)
     
-    # Create output directory - include model type in the directory name
-    model_type_dir = f"{args.output_dir}_{args.model_type}"
-    output_dir = create_output_dir(model_type_dir)
+    # Create output directory - include model type and augmentation in the directory name
+    model_dir_name = f"{args.output_dir}_{args.model_type}"
+    if args.augmentation != 'none':
+        model_dir_name += f"_aug_{args.augmentation}"
+    output_dir = create_output_dir(model_dir_name)
     print(f"Output directory: {output_dir}")
     
     # Extract run_name from output_dir for logging
@@ -742,14 +774,16 @@ def main():
     with open(os.path.join(output_dir, 'args.json'), 'w') as f:
         json.dump(vars(args), f, indent=2)
     
-    # Initialize wandb with model type info
+    # Initialize wandb with model type and augmentation info
     if args.use_wandb:
         # Use Indonesia timezone (UTC+7) for the timestamp
         indonesia_tz = pytz.timezone('Asia/Jakarta')
         timestamp = datetime.now(indonesia_tz).strftime('%Y%m%d-%H%M')
-        wandb_run_name = f"{timestamp}_{args.model_type}_"
+        wandb_run_name = f"{timestamp}_{args.model_type}"
+        if args.augmentation != 'none':
+            wandb_run_name += f"_aug_{args.augmentation}"
         if args.run_name:
-            wandb_run_name += args.run_name
+            wandb_run_name += f"_{args.run_name}"
         
         wandb.init(
             project=args.wandb_project,

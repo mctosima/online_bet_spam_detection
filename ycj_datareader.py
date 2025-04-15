@@ -4,11 +4,14 @@ import re
 import os
 import json
 import torch
+import random
 from torch.utils.data import Dataset
 from sklearn.model_selection import StratifiedKFold
 from transformers import AutoTokenizer
 import nltk
 from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.corpus import wordnet as wn
 
 # Download NLTK resources
 try:
@@ -23,6 +26,276 @@ except LookupError:
 
 INDONESIAN_STOPWORDS = set(stopwords.words('indonesian'))
 
+class TextAugmenter:
+    """Class for text augmentation techniques"""
+    
+    def __init__(self, p_augment=0.5, language='indonesian'):
+        """
+        Initialize the text augmenter
+        
+        Args:
+            p_augment: Probability of applying augmentation to a sample
+            language: Language of the text (impacts synonym selection)
+        """
+        self.p_augment = p_augment
+        self.language = language
+        
+        # Load stopwords
+        if language == 'indonesian':
+            self.stopwords = set(stopwords.words('indonesian'))
+        else:
+            self.stopwords = set(stopwords.words('english'))
+            
+    def get_synonyms(self, word):
+        """Get synonyms for a word (simplified for Indonesian)"""
+        synonyms = []
+        
+        # For Indonesian, we'll use a simple approach with WordNet
+        # This is not optimal for Indonesian but serves as a placeholder
+        synsets = wn.synsets(word)
+        if synsets:
+            for synset in synsets:
+                for lemma in synset.lemmas():
+                    synonym = lemma.name().replace('_', ' ')
+                    if synonym != word and synonym not in synonyms:
+                        synonyms.append(synonym)
+        
+        return synonyms
+    
+    def synonym_replacement(self, words, n_words=1):
+        """Replace n random words with their synonyms"""
+        if not words:
+            return words
+            
+        # Filter out stopwords
+        new_words = words.copy()
+        random_word_indices = [i for i, word in enumerate(words) if word not in self.stopwords]
+        
+        # If no valid words found, return original
+        if not random_word_indices:
+            return words
+        
+        # Determine number of words to replace
+        n_words = min(n_words, len(random_word_indices))
+        
+        # Replace random words with synonyms
+        random.shuffle(random_word_indices)
+        for i in range(n_words):
+            idx = random_word_indices[i]
+            word = words[idx]
+            synonyms = self.get_synonyms(word)
+            if synonyms:
+                new_words[idx] = random.choice(synonyms)
+        
+        return new_words
+    
+    def random_deletion(self, words, p_delete=0.1):
+        """Randomly delete words from the text with probability p_delete"""
+        if not words:
+            return words
+            
+        # Keep at least one word
+        if len(words) == 1:
+            return words
+            
+        # Randomly delete words
+        new_words = []
+        for word in words:
+            # Random number for this word
+            r = random.uniform(0, 1)
+            if r > p_delete:
+                new_words.append(word)
+                
+        # If all words were deleted, keep one random word
+        if not new_words:
+            rand_idx = random.randint(0, len(words) - 1)
+            new_words = [words[rand_idx]]
+            
+        return new_words
+    
+    def random_swap(self, words, n_swaps=1):
+        """Randomly swap words n times"""
+        if not words or len(words) < 2:
+            return words
+            
+        new_words = words.copy()
+        
+        # Determine number of swaps
+        n_swaps = min(n_swaps, len(words) // 2)  # Cap at half the length
+        
+        for _ in range(n_swaps):
+            # Get random indices to swap
+            idx1, idx2 = random.sample(range(len(new_words)), 2)
+            # Swap words
+            new_words[idx1], new_words[idx2] = new_words[idx2], new_words[idx1]
+            
+        return new_words
+    
+    def random_insertion(self, words, n_inserts=1):
+        """Randomly insert synonyms n times"""
+        if not words:
+            return words
+            
+        new_words = words.copy()
+        
+        # Filter out stopwords for finding random words
+        candidates = [word for word in words if word not in self.stopwords]
+        
+        # If no valid words found, return original
+        if not candidates:
+            return words
+        
+        # Determine number of insertions
+        n_inserts = min(n_inserts, len(words))
+        
+        for _ in range(n_inserts):
+            # Get random word and its synonyms
+            random_word = random.choice(candidates)
+            synonyms = self.get_synonyms(random_word)
+            
+            # If synonyms found, insert one at a random position
+            if synonyms:
+                synonym = random.choice(synonyms)
+                random_idx = random.randint(0, len(new_words))
+                new_words.insert(random_idx, synonym)
+            
+        return new_words
+    
+    def simulate_backtranslation(self, words, error_prob=0.2):
+        """
+        Simulate back-translation by introducing minor changes
+        that mimic translation artifacts
+        """
+        if not words:
+            return words
+            
+        new_words = words.copy()
+        
+        # Possible operations:
+        # 1. Remove articles (a, an, the)
+        # 2. Change word order slightly
+        # 3. Replace some words with synonyms
+        
+        # Remove articles (simple for demonstration)
+        articles = {'a', 'an', 'the', 'yang', 'ini', 'itu'}
+        new_words = [w for w in new_words if w.lower() not in articles]
+        
+        # Change word order (simple swap) - 20% chance
+        if random.random() < 0.2 and len(new_words) > 3:
+            # Find a sub-segment to swap
+            start_idx = random.randint(0, len(new_words) - 3)
+            segment_len = min(3, len(new_words) - start_idx)
+            segment = new_words[start_idx:start_idx+segment_len]
+            # Shuffle the segment
+            random.shuffle(segment)
+            # Replace in original
+            new_words[start_idx:start_idx+segment_len] = segment
+        
+        # Replace some words with synonyms
+        for i, word in enumerate(new_words):
+            if random.random() < error_prob and word not in self.stopwords:
+                synonyms = self.get_synonyms(word)
+                if synonyms:
+                    new_words[i] = random.choice(synonyms)
+        
+        return new_words
+    
+    def cascaded_augmentation(self, text):
+        """
+        Apply multiple augmentation techniques in sequence:
+        1. Synonym replacement
+        2. Random deletion
+        3. Random swap
+        4. Random insertion
+        
+        Args:
+            text: Text to augment
+            
+        Returns:
+            Augmented text after applying all techniques in sequence
+        """
+        # Tokenize text
+        words = word_tokenize(text)
+        
+        # If text is too short, don't augment
+        if len(words) < 3:
+            return text
+        
+        # 1. Apply synonym replacement (10-15% of words)
+        n_words = max(1, int(len(words) * random.uniform(0.1, 0.15)))
+        words = self.synonym_replacement(words, n_words)
+        
+        # 2. Apply random deletion (with 10% probability)
+        words = self.random_deletion(words, p_delete=0.1)
+        
+        # 3. Apply random swap (1 swap)
+        words = self.random_swap(words, n_swaps=1)
+        
+        # 4. Apply random insertion (1 insert)
+        words = self.random_insertion(words, n_inserts=1)
+        
+        # Rebuild text
+        return ' '.join(words)
+    
+    def augment(self, text, method='random'):
+        """
+        Apply text augmentation
+        
+        Args:
+            text: Text to augment
+            method: Augmentation method ('random', 'synonym', 'delete', 'swap', 
+                    'insert', 'backtranslation', 'cascaded', or 'none')
+        
+        Returns:
+            Augmented text
+        """
+        # Decide whether to augment
+        if method == 'none' or random.random() > self.p_augment:
+            return text
+            
+        # Tokenize text
+        words = word_tokenize(text)
+        
+        # If text is too short, don't augment
+        if len(words) < 3:
+            return text
+        
+        # Select random method if set to 'random'
+        if method == 'random':
+            method = random.choice(['synonym', 'delete', 'swap', 'insert', 'backtranslation', 'cascaded'])
+        
+        # Apply selected augmentation method
+        if method == 'synonym':
+            # Replace 10-20% of words with synonyms
+            n_words = max(1, int(len(words) * random.uniform(0.1, 0.2)))
+            words = self.synonym_replacement(words, n_words)
+            return ' '.join(words)
+        elif method == 'delete':
+            # Delete words with 10-20% probability
+            p_delete = random.uniform(0.1, 0.2)
+            words = self.random_deletion(words, p_delete)
+            return ' '.join(words)
+        elif method == 'swap':
+            # Swap 1-2 pairs of words
+            n_swaps = random.randint(1, 2)
+            words = self.random_swap(words, n_swaps)
+            return ' '.join(words)
+        elif method == 'insert':
+            # Insert 1-2 synonyms
+            n_inserts = random.randint(1, 2)
+            words = self.random_insertion(words, n_inserts)
+            return ' '.join(words)
+        elif method == 'backtranslation':
+            # Simulate back-translation
+            words = self.simulate_backtranslation(words)
+            return ' '.join(words)
+        elif method == 'cascaded':
+            # Apply cascaded augmentation (multiple techniques in sequence)
+            return self.cascaded_augmentation(text)
+        
+        # Default return (shouldn't reach here)
+        return text
+
 class YouTubeCommentDataset(Dataset):
     
     def __init__(self, 
@@ -35,7 +308,10 @@ class YouTubeCommentDataset(Dataset):
                  apply_preprocessing=True,
                  random_state=42,
                  folds_file="ycj_split.json",
-                 use_local_tokenizer=True):
+                 use_local_tokenizer=True,
+                 augmentation='none',
+                 p_augment=0.5,
+                 current_epoch=0):
         """
         Initialize the YouTube Comment Dataset for spam detection
         
@@ -50,6 +326,9 @@ class YouTubeCommentDataset(Dataset):
             random_state: Random seed for reproducibility
             folds_file: Path to save/load the fold indices
             use_local_tokenizer: Whether to use local tokenizer or download from huggingface
+            augmentation: Type of text augmentation to apply ('none', 'random', 'synonym', 'delete', 'swap', 'insert', 'backtranslation')
+            p_augment: Probability of applying augmentation to a sample
+            current_epoch: Current training epoch (used for dynamic augmentation)
         """
         self.file_path = file_path
         self.fold = fold
@@ -60,6 +339,15 @@ class YouTubeCommentDataset(Dataset):
         self.apply_preprocessing = apply_preprocessing
         self.random_state = random_state
         self.folds_file = folds_file
+        self.augmentation = augmentation
+        self.p_augment = p_augment
+        self.current_epoch = current_epoch
+        
+        # Initialize augmenter - only for training split
+        if split == "train" and augmentation != 'none':
+            self.augmenter = TextAugmenter(p_augment=p_augment, language='indonesian')
+        else:
+            self.augmenter = None
         
         # Initialize tokenizer
         if use_local_tokenizer and os.path.exists("./indobert-base-p1"):
@@ -80,6 +368,8 @@ class YouTubeCommentDataset(Dataset):
         self.setup_indices()
         
         print(f"Created {split} dataset for fold {fold+1}/{n_folds} with {len(self.indices)} samples")
+        if split == "train" and augmentation != 'none':
+            print(f"Using text augmentation: {augmentation} with probability {p_augment}")
     
     def load_data(self):
         """Load data from CSV file and preprocess text if needed"""
@@ -182,6 +472,17 @@ class YouTubeCommentDataset(Dataset):
         )
         return weights
     
+    def set_epoch(self, epoch):
+        """
+        Set the current epoch for epoch-aware augmentation
+        
+        Args:
+            epoch: Current training epoch
+        """
+        self.current_epoch = epoch
+        # Reset random seed based on epoch to ensure different augmentations
+        random.seed(self.random_state + epoch)
+    
     def __len__(self):
         """Return the number of samples in the dataset"""
         return len(self.indices)
@@ -200,6 +501,39 @@ class YouTubeCommentDataset(Dataset):
             message = self.preprocess_text(original_message)
         else:
             message = original_message
+        
+        # Apply augmentation if we're in training split and augmentation is enabled
+        if self.split == 'train' and self.augmenter is not None:
+            # Use a deterministic but different seed for each epoch and each sample
+            sample_epoch_seed = hash(str(original_idx) + str(self.current_epoch)) % 10000
+            random.seed(sample_epoch_seed)
+            
+            # Choose augmentation method dynamically based on epoch if set to 'random'
+            if self.augmentation == 'random':
+                # Change available methods based on epoch to create diversity
+                epoch_mod = self.current_epoch % 5
+                if epoch_mod == 0:
+                    aug_method = random.choice(['synonym', 'delete'])
+                elif epoch_mod == 1:
+                    aug_method = random.choice(['swap', 'insert'])
+                elif epoch_mod == 2:
+                    aug_method = random.choice(['backtranslation', 'synonym'])
+                elif epoch_mod == 3:
+                    aug_method = random.choice(['delete', 'swap'])
+                else:
+                    aug_method = random.choice(['synonym', 'delete', 'swap', 'insert', 'backtranslation'])
+            else:
+                aug_method = self.augmentation
+                
+            # Apply the selected augmentation
+            augmented_message = self.augmenter.augment(message, method=aug_method)
+            
+            # Only use augmented text if it's not empty
+            if augmented_message.strip():
+                message = augmented_message
+                
+            # Reset random seed
+            random.seed()
         
         # Step 3: Tokenize the comment
         encoding = self.tokenizer(

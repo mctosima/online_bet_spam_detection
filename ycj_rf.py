@@ -384,6 +384,63 @@ def plot_feature_importance(model, feature_names, output_dir, fold):
         plt.savefig(f"{output_dir}/feature_importance_fold_{fold}.png")
         plt.close()
 
+def calculate_rf_model_stats(pipeline):
+    """Calculate Random Forest model statistics including parameters, size, and computational complexity"""
+    try:
+        # Get the Random Forest model from the pipeline
+        rf_model = pipeline.named_steps['rf']
+        vectorizer = pipeline.named_steps['tfidf']
+        
+        # Number of trees
+        n_trees = len(rf_model.estimators_)
+        
+        # Number of features
+        n_features = len(vectorizer.get_feature_names_out())
+        
+        # Calculate total number of nodes across all trees
+        total_nodes = 0
+        for tree in rf_model.estimators_:
+            total_nodes += tree.tree_.node_count
+        
+        # Each node contains: feature index, threshold, values, children info
+        # Roughly 5 values per node (conservative estimate)
+        n_params = total_nodes * 5
+        
+        # Estimate model size in MB
+        # Each parameter is a float (typically 4-8 bytes), using 8 to be conservative
+        model_size_mb = (n_params * 8) / (1024 * 1024)
+        
+        # Estimate computational complexity
+        # For a decision tree, it's roughly the depth of the tree * number of trees
+        # Average depth = log2(number of nodes) for a balanced tree
+        if total_nodes > 0 and n_trees > 0:
+            avg_nodes_per_tree = total_nodes / n_trees
+            avg_depth = np.log2(avg_nodes_per_tree) if avg_nodes_per_tree > 1 else 1
+            # Each node comparison is roughly one multiply-add
+            # Total = avg_depth * n_trees * n_features
+            multiply_adds = avg_depth * n_trees * n_features / 1e6  # in millions
+        else:
+            multiply_adds = 0
+        
+        return {
+            'n_trees': n_trees,
+            'n_features': n_features,
+            'total_nodes': total_nodes,
+            'n_params': n_params,
+            'model_size_mb': model_size_mb,
+            'multiply_adds_M': multiply_adds
+        }
+    except Exception as e:
+        print(f"Error calculating model stats: {e}")
+        return {
+            'n_trees': 'N/A',
+            'n_features': 'N/A',
+            'total_nodes': 'N/A',
+            'n_params': 'N/A',
+            'model_size_mb': 'N/A',
+            'multiply_adds_M': 'N/A'
+        }
+
 def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
     # Load dataset
     print("Loading dataset...")
@@ -508,6 +565,16 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
                     
                     # Train model
                     pipeline.fit(X_train, y_train)
+                    
+                    # Calculate and print model statistics
+                    model_stats = calculate_rf_model_stats(pipeline)
+                    print("\nModel Statistics:")
+                    print(f"  Number of Trees: {model_stats['n_trees']}")
+                    print(f"  Number of Features: {model_stats['n_features']}")
+                    print(f"  Total Tree Nodes: {model_stats['total_nodes']}")
+                    print(f"  Total Parameters: {model_stats['n_params']}")
+                    print(f"  Estimated Model Size: {model_stats['model_size_mb']:.2f} MB")
+                    print(f"  Computational Complexity: {model_stats['multiply_adds_M']:.2f} million multiply-adds")
                     
                     # Make predictions and probability estimates
                     y_pred = pipeline.predict(X_test)

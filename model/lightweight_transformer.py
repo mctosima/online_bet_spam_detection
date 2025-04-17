@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Tuple, Optional
 import numpy as np
-from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precision_score, recall_score
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, precision_score, recall_score, roc_auc_score
 from torchinfo import summary
 
 class MultiHeadSelfAttention(nn.Module):
@@ -97,7 +97,8 @@ class LightweightTransformer(nn.Module):
                  ff_dim=512,
                  num_layers=3,
                  num_classes=5,
-                 dropout_rate=0.1):
+                 dropout_rate=0.1,
+                 pooling_strategy='cls'):  # Added pooling strategy
         """
         Initialize lightweight transformer for text classification
         
@@ -110,12 +111,14 @@ class LightweightTransformer(nn.Module):
             num_layers: Number of transformer layers
             num_classes: Number of output classes
             dropout_rate: Dropout probability
+            pooling_strategy: Strategy for sequence pooling ('cls' or 'mean')
         """
         super().__init__()
         
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.pos_embedding = nn.Parameter(torch.zeros(1, max_seq_len, embed_dim))
         self.dropout = nn.Dropout(dropout_rate)
+        self.pooling_strategy = pooling_strategy
         
         # Create transformer encoder layers
         self.transformer_blocks = nn.ModuleList(
@@ -155,11 +158,28 @@ class LightweightTransformer(nn.Module):
         for transformer_block in self.transformer_blocks:
             x = transformer_block(x, attention_mask)
         
-        # Use the [CLS] token representation (first token) for classification
-        cls_token = x[:, 0, :]
+        # Apply pooling strategy
+        if self.pooling_strategy == 'cls':
+            # Use the [CLS] token representation (first token) for classification
+            pooled_output = x[:, 0, :]
+        elif self.pooling_strategy == 'mean':
+            # Apply mean pooling over the sequence length
+            # Use attention mask to exclude padding tokens from the mean
+            if attention_mask is not None:
+                # Expand attention mask to match embedding dimension
+                mask_expanded = attention_mask.unsqueeze(-1).expand(x.size()).float()
+                # Apply mask and calculate mean
+                sum_embeddings = torch.sum(x * mask_expanded, dim=1)
+                sum_mask = torch.sum(mask_expanded, dim=1)
+                pooled_output = sum_embeddings / sum_mask
+            else:
+                # If no mask is provided, take mean over all tokens
+                pooled_output = torch.mean(x, dim=1)
+        else:
+            raise ValueError(f"Unknown pooling strategy: {self.pooling_strategy}")
         
         # Pass through the classification head
-        logits = self.classifier(cls_token)
+        logits = self.classifier(pooled_output)
         
         return logits
     
@@ -217,13 +237,26 @@ class LightweightTransformer(nn.Module):
         accuracy = accuracy_score(true_labels, predictions)
         macro_f1 = f1_score(true_labels, predictions, average='macro')
         weighted_f1 = f1_score(true_labels, predictions, average='weighted')
+        precision = precision_score(true_labels, predictions, average='weighted', zero_division=1)
+        recall = recall_score(true_labels, predictions, average='weighted', zero_division=1)
+        
+        # Try to calculate AUC (only for binary classification)
+        auc = None
+        if len(set(true_labels)) == 2:
+            try:
+                auc = roc_auc_score(true_labels, predictions)
+            except:
+                pass
         
         # Return metrics
         return {
             'loss': total_loss / len(dataloader),
             'accuracy': accuracy,
             'macro_f1': macro_f1,
-            'weighted_f1': weighted_f1
+            'weighted_f1': weighted_f1,
+            'precision': precision,
+            'recall': recall,
+            'auc': auc
         }
     
     @staticmethod
@@ -268,7 +301,17 @@ class LightweightTransformer(nn.Module):
         accuracy = accuracy_score(true_labels, predictions)
         macro_f1 = f1_score(true_labels, predictions, average='macro')
         weighted_f1 = f1_score(true_labels, predictions, average='weighted')
+        precision = precision_score(true_labels, predictions, average='weighted', zero_division=1)
+        recall = recall_score(true_labels, predictions, average='weighted', zero_division=1)
         conf_matrix = confusion_matrix(true_labels, predictions)
+        
+        # Try to calculate AUC (only for binary classification)
+        auc = None
+        if len(set(true_labels)) == 2:
+            try:
+                auc = roc_auc_score(true_labels, predictions)
+            except:
+                pass
         
         # Return metrics
         return {
@@ -276,6 +319,9 @@ class LightweightTransformer(nn.Module):
             'accuracy': accuracy,
             'macro_f1': macro_f1,
             'weighted_f1': weighted_f1,
+            'precision': precision,
+            'recall': recall,
+            'auc': auc,
             'confusion_matrix': conf_matrix
         }
     
@@ -290,7 +336,7 @@ class LightweightTransformer(nn.Module):
             zero_division: Value to return when there is a zero division (0 or 1)
             
         Returns:
-            Tuple of (accuracy, weighted_f1, precision, recall, macro_f1)
+            Tuple of (accuracy, weighted_f1, precision, recall, macro_f1, auc)
         """
         accuracy = accuracy_score(true_labels, predictions)
         weighted_f1 = f1_score(true_labels, predictions, average='weighted', zero_division=zero_division)
@@ -298,7 +344,15 @@ class LightweightTransformer(nn.Module):
         precision = precision_score(true_labels, predictions, average='weighted', zero_division=zero_division)
         recall = recall_score(true_labels, predictions, average='weighted', zero_division=zero_division)
         
-        return accuracy, weighted_f1, precision, recall, macro_f1
+        # Try to calculate AUC (only for binary classification)
+        auc = None
+        if len(set(true_labels)) == 2:
+            try:
+                auc = roc_auc_score(true_labels, predictions)
+            except:
+                pass
+        
+        return accuracy, weighted_f1, precision, recall, macro_f1, auc
     
     def save_model(self, path):
         """
@@ -315,6 +369,7 @@ class LightweightTransformer(nn.Module):
             'num_layers': len(self.transformer_blocks),
             'num_classes': self.classifier[-1].out_features,
             'dropout_rate': self.dropout.p,
+            'pooling_strategy': self.pooling_strategy
         }
         
         torch.save({
@@ -337,6 +392,9 @@ class LightweightTransformer(nn.Module):
         checkpoint = torch.load(path, map_location=device)
         config = checkpoint['model_config']
         
+        # Handle case where older models don't have pooling_strategy
+        pooling_strategy = config.get('pooling_strategy', 'cls')
+        
         model = cls(
             vocab_size=config['vocab_size'],
             embed_dim=config['embed_dim'],
@@ -344,7 +402,8 @@ class LightweightTransformer(nn.Module):
             ff_dim=config['ff_dim'],
             num_layers=config['num_layers'],
             num_classes=config['num_classes'],
-            dropout_rate=config['dropout_rate']
+            dropout_rate=config['dropout_rate'],
+            pooling_strategy=pooling_strategy
         )
         
         model.load_state_dict(checkpoint['model_state_dict'])

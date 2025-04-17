@@ -409,6 +409,47 @@ def plot_confusion_matrix(cm, fold, output_dir):
     plt.savefig(f"{output_dir}/confusion_matrix_fold_{fold}.png")
     plt.close()
 
+def calculate_svm_model_stats(pipeline):
+    """Calculate SVM model statistics including parameters, size, and computational complexity"""
+    try:
+        # Get the SVM model from the pipeline
+        svm_model = pipeline.named_steps['svm']
+        vectorizer = pipeline.named_steps['tfidf']
+        
+        # Number of support vectors
+        n_support_vectors = svm_model.n_support_.sum() if hasattr(svm_model, 'n_support_') else 0
+        
+        # Number of features
+        n_features = len(vectorizer.get_feature_names_out())
+        
+        # Total parameters (support vectors * features + bias)
+        n_params = n_support_vectors * n_features + 1
+        
+        # Estimate model size in MB
+        # Each parameter is a float (typically 4-8 bytes), using 8 to be conservative
+        model_size_mb = (n_params * 8) / (1024 * 1024)
+        
+        # Estimate computational complexity (for inference)
+        # For SVM, main computation is dot product between input and support vectors
+        multiply_adds = n_support_vectors * n_features / 1e6  # in millions
+        
+        return {
+            'n_support_vectors': n_support_vectors,
+            'n_features': n_features,
+            'n_params': n_params,
+            'model_size_mb': model_size_mb,
+            'multiply_adds_M': multiply_adds
+        }
+    except Exception as e:
+        print(f"Error calculating model stats: {e}")
+        return {
+            'n_support_vectors': 'N/A',
+            'n_features': 'N/A',
+            'n_params': 'N/A',
+            'model_size_mb': 'N/A',
+            'multiply_adds_M': 'N/A'
+        }
+
 def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
     # Load dataset
     print("Loading dataset...")
@@ -528,6 +569,15 @@ def main(augmentation='none', p_augment=0.5, augment_ratio=1.0, num_epochs=5):
                     
                     # Train model
                     pipeline.fit(X_train, y_train)
+                    
+                    # Calculate and print model statistics
+                    model_stats = calculate_svm_model_stats(pipeline)
+                    print("\nModel Statistics:")
+                    print(f"  Number of Support Vectors: {model_stats['n_support_vectors']}")
+                    print(f"  Number of Features: {model_stats['n_features']}")
+                    print(f"  Total Parameters: {model_stats['n_params']}")
+                    print(f"  Estimated Model Size: {model_stats['model_size_mb']:.2f} MB")
+                    print(f"  Computational Complexity: {model_stats['multiply_adds_M']:.2f} million multiply-adds")
                     
                     # Make predictions
                     y_pred = pipeline.predict(X_test)

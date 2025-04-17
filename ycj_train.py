@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 import pytz  # Add this import for timezone support
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau
+from torch.optim import AdamW, Adam, SGD
+from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau, StepLR, CosineAnnealingLR
 from transformers import get_linear_schedule_with_warmup
 import json
 import matplotlib.pyplot as plt
@@ -59,6 +59,8 @@ def parse_args():
                         help='Feed-forward dimension for lightweight model')
     parser.add_argument('--num_layers', type=int, default=3,
                         help='Number of transformer layers for lightweight model')
+    parser.add_argument('--pooling_strategy', type=str, default='cls', choices=['cls', 'mean'],
+                        help='Pooling strategy for lightweight model')
     
     # CNN model specific parameters
     parser.add_argument('--num_filters', type=int, default=100,
@@ -85,6 +87,19 @@ def parse_args():
                         help='Number of cross-validation folds')
     parser.add_argument('--use_class_weights', action='store_true',
                         help='Use class weights for loss function')
+    
+    # Optimizer and scheduler parameters
+    parser.add_argument('--optimizer', type=str, default='adamw', choices=['adam', 'adamw', 'sgd'],
+                        help='Optimizer to use')
+    parser.add_argument('--scheduler', type=str, default='reduce_lr', 
+                        choices=['reduce_lr', 'step_lr', 'cosine', 'linear_warmup', 'none'],
+                        help='Learning rate scheduler to use')
+    parser.add_argument('--step_size', type=int, default=5,
+                        help='Step size for StepLR scheduler')
+    parser.add_argument('--warmup_steps', type=int, default=0,
+                        help='Number of warmup steps for linear warmup scheduler')
+    parser.add_argument('--warmup_ratio', type=float, default=0.1,
+                        help='Ratio of total steps to use for warmup')
     
     # Augmentation parameters
     parser.add_argument('--augmentation', type=str, default='none',
@@ -118,6 +133,17 @@ def parse_args():
                         help='Number of epochs to run in preview mode')
     parser.add_argument('--preview_folds', type=int, default=2,
                         help='Number of folds to run in preview mode')
+    
+    # Ablation study parameters
+    parser.add_argument('--ablation', action='store_true',
+                        help='Run in ablation mode - use with other ablation flags')
+    parser.add_argument('--ablation_param', type=str, default=None,
+                        choices=['num_layers', 'embed_dim', 'ff_dim', 'num_heads', 'dropout', 
+                                'pooling_strategy', 'lr', 'optimizer', 'batch_size', 'scheduler', 
+                                'class_weights', 'augmentation'],
+                        help='Parameter to ablate in ablation study')
+    parser.add_argument('--ablation_values', type=str, default=None,
+                        help='Comma-separated values to use for ablation study')
     
     return parser.parse_args()
 
@@ -316,7 +342,8 @@ def create_model(args, device):
             ff_dim=args.ff_dim,
             num_layers=args.num_layers,
             num_classes=2,  # Binary classification
-            dropout_rate=args.dropout
+            dropout_rate=args.dropout,
+            pooling_strategy=args.pooling_strategy
         )
     else:  # cnn
         # Parse filter sizes from string to list of integers
@@ -336,6 +363,96 @@ def create_model(args, device):
     model.to(device)
     
     return model
+
+def create_optimizer(args, model):
+    """
+    Create the optimizer based on args
+    
+    Args:
+        args: Command line arguments
+        model: Model to optimize
+        
+    Returns:
+        Optimizer instance
+    """
+    if args.optimizer == 'adamw':
+        optimizer = AdamW(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay
+        )
+    elif args.optimizer == 'adam':
+        optimizer = Adam(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay
+        )
+    elif args.optimizer == 'sgd':
+        optimizer = SGD(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            momentum=0.9  # Default momentum value
+        )
+    else:
+        raise ValueError(f"Unknown optimizer: {args.optimizer}")
+    
+    return optimizer
+
+def create_scheduler(args, optimizer, total_steps=None, len_train_loader=None):
+    """
+    Create the learning rate scheduler based on args
+    
+    Args:
+        args: Command line arguments
+        optimizer: Optimizer to schedule
+        total_steps: Total number of training steps (required for some schedulers)
+        len_train_loader: Length of the training dataloader (required for some schedulers)
+        
+    Returns:
+        Scheduler instance or None
+    """
+    if total_steps is None and args.scheduler in ['linear_warmup', 'cosine']:
+        if len_train_loader is None:
+            raise ValueError("len_train_loader must be provided for linear_warmup or cosine scheduler")
+        total_steps = len_train_loader * args.epochs
+    
+    if args.scheduler == 'reduce_lr':
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            mode='max',  # since we're tracking f1 score
+            factor=args.lr_factor,
+            patience=args.lr_patience,
+            verbose=True
+        )
+    elif args.scheduler == 'step_lr':
+        scheduler = StepLR(
+            optimizer,
+            step_size=args.step_size,
+            gamma=args.lr_factor
+        )
+    elif args.scheduler == 'cosine':
+        scheduler = CosineAnnealingLR(
+            optimizer, 
+            T_max=total_steps
+        )
+    elif args.scheduler == 'linear_warmup':
+        warmup_steps = args.warmup_steps
+        if warmup_steps == 0:
+            # Use warmup ratio if warmup_steps not specified
+            warmup_steps = int(total_steps * args.warmup_ratio)
+        
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_steps
+        )
+    elif args.scheduler == 'none':
+        scheduler = None
+    else:
+        raise ValueError(f"Unknown scheduler: {args.scheduler}")
+    
+    return scheduler
 
 def compute_metrics(labels, predictions, zero_division=1, compute_auc=True):
     """
@@ -396,33 +513,20 @@ def train_fold(fold, args, output_dir, device):
     model = create_model(args, device)
     
     # Define optimizer
-    optimizer = AdamW(
-        model.parameters(),
-        lr=args.lr,
-        weight_decay=args.weight_decay
-    )
+    optimizer = create_optimizer(args, model)
     
     # Define scheduler
     total_steps = len(train_loader) * args.epochs
     
-    # Different learning rate behavior based on model type
-    if args.model_type == 'bert':
-        warmup_scheduler = get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=total_steps // 10,  # 10% of steps for warmup
-            num_training_steps=total_steps
-        )
-    else:
-        # For lightweight model, use a simpler scheduler or None
-        warmup_scheduler = None
+    # Create warmup scheduler if needed
+    warmup_scheduler = None
+    if args.scheduler == 'linear_warmup':
+        warmup_scheduler = create_scheduler(args, optimizer, total_steps=total_steps)
     
-    # Add ReduceLROnPlateau scheduler
-    lr_scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='max',  # since we're tracking f1 score
-        factor=args.lr_factor,
-        patience=args.lr_patience
-    )
+    # Create main scheduler (for non-warmup schedulers)
+    lr_scheduler = None
+    if args.scheduler != 'linear_warmup' and args.scheduler != 'none':
+        lr_scheduler = create_scheduler(args, optimizer, len_train_loader=len(train_loader))
     
     # Define loss function
     if args.use_class_weights:
@@ -554,7 +658,7 @@ def train_fold(fold, args, output_dir, device):
             loss.backward()
             optimizer.step()
             
-            # Update scheduler
+            # Update scheduler if using warmup scheduler
             if warmup_scheduler is not None:
                 warmup_scheduler.step()
             
@@ -686,9 +790,16 @@ def train_fold(fold, args, output_dir, device):
         )
         print(f"Saved checkpoint: {os.path.basename(checkpoint_path)}")
         
-        # Step LR scheduler after validation
+        # Step LR scheduler after validation (for non-warmup schedulers)
         prev_lr = optimizer.param_groups[0]['lr']
-        lr_scheduler.step(val_metrics['weighted_f1'])
+        
+        # Update step-based schedulers (not ReduceLROnPlateau)
+        if lr_scheduler is not None:
+            if args.scheduler == 'reduce_lr':
+                lr_scheduler.step(val_metrics['weighted_f1'])  # Metric-based scheduler
+            else:
+                lr_scheduler.step()  # Epoch-based scheduler
+        
         current_lr = optimizer.param_groups[0]['lr']
         
         # Log if learning rate changed
@@ -987,177 +1098,336 @@ def main():
     # Parse arguments
     args = parse_args()
     
-    # Set random seed
-    set_seed(args.seed)
-    
-    # Create output directory - include model type and augmentation in the directory name
-    model_dir_name = f"{args.output_dir}_{args.model_type}"
-    if args.model_type == 'cnn':
-        model_dir_name += f"_{args.num_filters}filters"
-    elif args.model_type == 'lightweight':
-        model_dir_name += f"_{args.embed_dim}emb_{args.num_layers}layers"
-    if args.augmentation != 'none':
-        model_dir_name += f"_aug_{args.augmentation}"
-    output_dir = create_output_dir(model_dir_name)
-    print(f"Output directory: {output_dir}")
-    
-    # Extract run_name from output_dir for logging
-    run_name = os.path.basename(output_dir)
-    if args.run_name:
-        run_name = f"{run_name}_{args.run_name}"
-    
-    # Save args
-    with open(os.path.join(output_dir, 'args.json'), 'w') as f:
-        json.dump(vars(args), f, indent=2)
-    
-    # Initialize wandb with model type and augmentation info
-    if args.use_wandb:
-        # Use Indonesia timezone (UTC+7) for the timestamp
-        indonesia_tz = pytz.timezone('Asia/Jakarta')
-        timestamp = datetime.now(indonesia_tz).strftime('%Y%m%d-%H%M')
-        wandb_run_name = f"{timestamp}_{args.model_type}"
-        if args.model_type == 'cnn':
-            wandb_run_name += f"_{args.num_filters}f"
-        elif args.model_type == 'lightweight':
-            wandb_run_name += f"_{args.embed_dim}e{args.num_layers}l"
-        if args.augmentation != 'none':
-            wandb_run_name += f"_aug_{args.augmentation}"
-        if args.run_name:
-            wandb_run_name += f"_{args.run_name}"
+    # Check if ablation mode is enabled
+    if args.ablation:
+        if args.ablation_param is None or args.ablation_values is None:
+            raise ValueError("In ablation mode, both --ablation_param and --ablation_values must be specified")
         
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=wandb_run_name,
-            config=vars(args),
-            dir=output_dir
-        )
-        # Log code file
-        wandb.save(os.path.abspath(__file__))
-        print(f"Logging to Weights & Biases project: {args.wandb_project}")
-    
-    # Determine device
-    device = check_set_gpu()
-    print(f"Using device: {device}")
-    
-    # In preview mode, use only a limited number of folds
-    if args.preview_mode:
-        print(f"\n🔍 PREVIEW MODE ACTIVE - Using only {args.preview_folds} folds for quick testing")
-        n_folds = min(args.preview_folds, args.n_folds)
-        print(f"Preview configuration:")
-        print(f"  - Samples per fold: {args.preview_samples}")
-        print(f"  - Epochs per fold: {args.preview_epochs}")
-        print(f"  - Number of folds: {n_folds}")
+        # Parse ablation values
+        ablation_values = args.ablation_values.split(',')
+        
+        # Only single fold for ablation studies
+        original_n_folds = args.n_folds
+        args.n_folds = 1
+        
+        # Create directory for ablation results
+        ablation_base_dir = f"{args.output_dir}_ablation_{args.ablation_param}"
+        
+        # For each ablation value, run a separate training
+        ablation_results = []
+        
+        for value in ablation_values:
+            # Set the parameter value
+            if args.ablation_param == 'num_layers':
+                args.num_layers = int(value)
+                param_str = f"layers_{value}"
+            elif args.ablation_param == 'embed_dim':
+                args.embed_dim = int(value)
+                param_str = f"embed_{value}"
+            elif args.ablation_param == 'ff_dim':
+                args.ff_dim = int(value)
+                param_str = f"ff_{value}"
+            elif args.ablation_param == 'num_heads':
+                args.num_heads = int(value)
+                param_str = f"heads_{value}"
+            elif args.ablation_param == 'dropout':
+                args.dropout = float(value)
+                param_str = f"dropout_{value}"
+            elif args.ablation_param == 'pooling_strategy':
+                args.pooling_strategy = value
+                param_str = f"pooling_{value}"
+            elif args.ablation_param == 'lr':
+                args.lr = float(value)
+                param_str = f"lr_{value}"
+            elif args.ablation_param == 'optimizer':
+                args.optimizer = value
+                param_str = f"opt_{value}"
+            elif args.ablation_param == 'batch_size':
+                args.batch_size = int(value)
+                param_str = f"batch_{value}"
+            elif args.ablation_param == 'scheduler':
+                args.scheduler = value
+                param_str = f"sched_{value}"
+            elif args.ablation_param == 'class_weights':
+                args.use_class_weights = (value.lower() == 'true')
+                param_str = f"weights_{value}"
+            elif args.ablation_param == 'augmentation':
+                args.augmentation = value
+                param_str = f"aug_{value}"
+            else:
+                raise ValueError(f"Unknown ablation parameter: {args.ablation_param}")
+            
+            # Set run name for this ablation run
+            args.run_name = f"ablation_{args.ablation_param}_{value}"
+            
+            # Set output directory for this ablation run
+            output_dir = create_output_dir(f"{ablation_base_dir}/{param_str}")
+            
+            # Run training
+            print(f"\n{'='*100}")
+            print(f"Running ablation for {args.ablation_param}={value}")
+            print(f"{'='*100}")
+            
+            # Set random seed
+            set_seed(args.seed)
+            
+            # Save args
+            with open(os.path.join(output_dir, 'args.json'), 'w') as f:
+                json.dump(vars(args), f, indent=2)
+            
+            # Initialize wandb with model type and ablation info
+            wandb_run = None
+            if args.use_wandb:
+                # Use Indonesia timezone (UTC+7) for the timestamp
+                indonesia_tz = pytz.timezone('Asia/Jakarta')
+                timestamp = datetime.now(indonesia_tz).strftime('%Y%m%d-%H%M')
+                wandb_run_name = f"{timestamp}_ablation_{args.ablation_param}_{value}"
+                
+                wandb_run = wandb.init(
+                    project=args.wandb_project,
+                    entity=args.wandb_entity,
+                    name=wandb_run_name,
+                    config=vars(args),
+                    dir=output_dir,
+                    group=f"ablation_{args.ablation_param}"
+                )
+                # Log code file
+                wandb.save(os.path.abspath(__file__))
+                print(f"Logging to Weights & Biases project: {args.wandb_project}")
+            
+            # Determine device
+            device = check_set_gpu()
+            print(f"Using device: {device}")
+            
+            # Run a single fold
+            fold_metrics, best_val_f1, best_metrics = train_fold(0, args, output_dir, device)
+            
+            # Store results with parameter value
+            result = {
+                'param_value': value,
+                'metrics': best_metrics,
+                'best_f1': best_val_f1
+            }
+            ablation_results.append(result)
+            
+            # Finish wandb run
+            if args.use_wandb:
+                wandb_run.finish()
+        
+        # Save ablation results to a single file
+        with open(os.path.join(os.path.dirname(ablation_base_dir), f"ablation_{args.ablation_param}_results.json"), 'w') as f:
+            json.dump(serialize_for_json(ablation_results), f, indent=2)
+        
+        # Plot ablation results
+        plt.figure(figsize=(12, 8))
+        
+        # Extract values for plotting
+        param_values = [r['param_value'] for r in ablation_results]
+        f1_scores = [r['best_f1'] for r in ablation_results]
+        accuracies = [r['metrics']['accuracy'] for r in ablation_results]
+        precisions = [r['metrics']['precision'] for r in ablation_results]
+        recalls = [r['metrics']['recall'] for r in ablation_results]
+        
+        # Create bar width
+        x = np.arange(len(param_values))
+        width = 0.2
+        
+        # Create bars
+        plt.bar(x - 1.5*width, f1_scores, width, label='F1 Score')
+        plt.bar(x - 0.5*width, accuracies, width, label='Accuracy')
+        plt.bar(x + 0.5*width, precisions, width, label='Precision')
+        plt.bar(x + 1.5*width, recalls, width, label='Recall')
+        
+        # Add labels and title
+        plt.xlabel(f'Ablation Values for {args.ablation_param}')
+        plt.ylabel('Score')
+        plt.title(f'Ablation Study: Effect of {args.ablation_param} on Model Performance')
+        plt.xticks(x, param_values)
+        plt.legend()
+        plt.tight_layout()
+        
+        # Save plot
+        plt.savefig(os.path.join(os.path.dirname(ablation_base_dir), f"ablation_{args.ablation_param}_plot.png"))
+        plt.close()
+        
+        # Restore original n_folds
+        args.n_folds = original_n_folds
+        
+        print(f"\nAblation study for {args.ablation_param} completed. Results saved.")
+        
     else:
-        n_folds = args.n_folds
-    
-    # Cross-validation
-    fold_results = []
-    best_f1_scores = []
-    best_epochs = []
-    best_metrics_list = []  # Store best metrics from each fold
-    
-    for fold in range(n_folds):  # Use n_folds instead of args.n_folds
-        fold_metrics, best_val_f1, best_metrics = train_fold(fold, args, output_dir, device)
-        fold_results.append(fold_metrics)
-        best_f1_scores.append(best_val_f1)
-        best_metrics_list.append(best_metrics)  # Store best metrics
+        # Regular training (non-ablation)
+        # Set random seed
+        set_seed(args.seed)
         
-        # Find the best epoch from the fold's training history
-        with open(os.path.join(output_dir, f"fold_{fold}", "training_history.json"), "r") as f:
-            history = json.load(f)
-            best_epochs.append(history["best_epoch"])
-    
-    # Compute average metrics across folds using the best metrics from each fold
-    avg_accuracy = np.mean([metrics['accuracy'] for metrics in best_metrics_list])
-    avg_precision = np.mean([metrics['precision'] for metrics in best_metrics_list])
-    avg_recall = np.mean([metrics['recall'] for metrics in best_metrics_list])
-    avg_macro_f1 = np.mean([metrics['macro_f1'] for metrics in best_metrics_list])
-    avg_weighted_f1 = np.mean([metrics['weighted_f1'] for metrics in best_metrics_list])
-    
-    # Calculate AUC average, handling possible None values
-    auc_values = [metrics['auc'] for metrics in best_metrics_list if metrics['auc'] is not None]
-    avg_auc = np.mean(auc_values) if auc_values else None
-    
-    avg_best_f1 = np.mean(best_f1_scores)
-    
-    # Print final results with clearer formatting
-    print("\n" + "="*80)
-    print("CROSS-VALIDATION RESULTS (BEST EPOCHS):")
-    print("-"*80)
-    print(f"  Average Accuracy:    {avg_accuracy:.4f}")
-    print(f"  Average Precision:   {avg_precision:.4f}")
-    print(f"  Average Recall:      {avg_recall:.4f}")
-    print(f"  Average F1 (weight): {avg_weighted_f1:.4f}")
-    print(f"  Average F1 (macro):  {avg_macro_f1:.4f}")
-    print(f"  Average AUC:         {format_metric_value(avg_auc)}")
-    print(f"  Average Best F1:     {avg_best_f1:.4f}")
-    print("="*80)
-    
-    # Per-fold summary
-    print("\nPER-FOLD METRICS (BEST EPOCHS):")
-    print("-"*80)
-    for i, metrics in enumerate(best_metrics_list):
-        print(f"Fold {i+1}:")
-        print(f"  Accuracy:  {metrics['accuracy']:.4f}")
-        print(f"  Precision: {metrics['precision']:.4f}")
-        print(f"  Recall:    {metrics['recall']:.4f}")
-        print(f"  F1:        {metrics['weighted_f1']:.4f}")
-        print(f"  AUC:       {format_metric_value(metrics['auc'])}")
-        print(f"  Best Epoch: {best_epochs[i]+1}")
-        print("-"*40)
-    
-    # Log final cross-validation results to wandb
-    if args.use_wandb:
-        wandb.log({
-            "final/avg_accuracy": avg_accuracy,
-            "final/avg_precision": avg_precision,
-            "final/avg_recall": avg_recall,
-            "final/avg_macro_f1": avg_macro_f1,
-            "final/avg_weighted_f1": avg_weighted_f1,
-            "final/avg_auc": avg_auc if avg_auc is not None else 0.0,
-            "final/avg_best_f1": avg_best_f1
-        })
-    
-    # Save cross-validation results - serialize properly
-    cv_results = {
-        'fold_metrics': [
-            {k: v for k, v in metrics.items() if k != 'confusion_matrix'}
-            for metrics in fold_results
-        ],
-        'best_metrics': [
-            {k: v for k, v in metrics.items() if k != 'confusion_matrix'}
-            for metrics in best_metrics_list
-        ],
-        'best_f1_scores': best_f1_scores,
-        'best_epochs': best_epochs,
-        'avg_accuracy': avg_accuracy,
-        'avg_precision': avg_precision,
-        'avg_recall': avg_recall,
-        'avg_macro_f1': avg_macro_f1,
-        'avg_weighted_f1': avg_weighted_f1,
-        'avg_auc': float(avg_auc) if avg_auc is not None else None,
-        'avg_best_f1': avg_best_f1
-    }
-    
-    # Properly serialize for JSON
-    serialized_results = serialize_for_json(cv_results)
-    
-    with open(os.path.join(output_dir, 'cv_results.json'), 'w') as f:
-        json.dump(serialized_results, f, indent=2)
-    
-    # Create and save run summary
-    log_file = log_run_summary(output_dir, run_name, fold_results, best_f1_scores, best_epochs, best_metrics_list)
-    
-    # Log summary file to wandb if enabled
-    if args.use_wandb:
-        wandb.save(log_file)
-    
-    print(f"\nTraining completed for {args.model_type} model. Results saved to {output_dir}")
-    
-    # Finish wandb run
-    if args.use_wandb:
-        wandb.finish()
+        # Create output directory - include model type and augmentation in the directory name
+        model_dir_name = f"{args.output_dir}_{args.model_type}"
+        if args.model_type == 'cnn':
+            model_dir_name += f"_{args.num_filters}filters"
+        elif args.model_type == 'lightweight':
+            model_dir_name += f"_{args.embed_dim}emb_{args.num_layers}layers"
+        if args.augmentation != 'none':
+            model_dir_name += f"_aug_{args.augmentation}"
+        output_dir = create_output_dir(model_dir_name)
+        print(f"Output directory: {output_dir}")
+        
+        # Extract run_name from output_dir for logging
+        run_name = os.path.basename(output_dir)
+        if args.run_name:
+            run_name = f"{run_name}_{args.run_name}"
+        
+        # Save args
+        with open(os.path.join(output_dir, 'args.json'), 'w') as f:
+            json.dump(vars(args), f, indent=2)
+        
+        # Initialize wandb with model type and augmentation info
+        if args.use_wandb:
+            # Use Indonesia timezone (UTC+7) for the timestamp
+            indonesia_tz = pytz.timezone('Asia/Jakarta')
+            timestamp = datetime.now(indonesia_tz).strftime('%Y%m%d-%H%M')
+            wandb_run_name = f"{timestamp}_{args.model_type}"
+            if args.model_type == 'cnn':
+                wandb_run_name += f"_{args.num_filters}f"
+            elif args.model_type == 'lightweight':
+                wandb_run_name += f"_{args.embed_dim}e{args.num_layers}l"
+            if args.augmentation != 'none':
+                wandb_run_name += f"_aug_{args.augmentation}"
+            if args.run_name:
+                wandb_run_name += f"_{args.run_name}"
+            
+            wandb.init(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                name=wandb_run_name,
+                config=vars(args),
+                dir=output_dir
+            )
+            # Log code file
+            wandb.save(os.path.abspath(__file__))
+            print(f"Logging to Weights & Biases project: {args.wandb_project}")
+        
+        # Determine device
+        device = check_set_gpu()
+        print(f"Using device: {device}")
+        
+        # In preview mode, use only a limited number of folds
+        if args.preview_mode:
+            print(f"\n🔍 PREVIEW MODE ACTIVE - Using only {args.preview_folds} folds for quick testing")
+            n_folds = min(args.preview_folds, args.n_folds)
+            print(f"Preview configuration:")
+            print(f"  - Samples per fold: {args.preview_samples}")
+            print(f"  - Epochs per fold: {args.preview_epochs}")
+            print(f"  - Number of folds: {n_folds}")
+        else:
+            n_folds = args.n_folds
+        
+        # Cross-validation
+        fold_results = []
+        best_f1_scores = []
+        best_epochs = []
+        best_metrics_list = []  # Store best metrics from each fold
+        
+        for fold in range(n_folds):  # Use n_folds instead of args.n_folds
+            fold_metrics, best_val_f1, best_metrics = train_fold(fold, args, output_dir, device)
+            fold_results.append(fold_metrics)
+            best_f1_scores.append(best_val_f1)
+            best_metrics_list.append(best_metrics)  # Store best metrics
+            
+            # Find the best epoch from the fold's training history
+            with open(os.path.join(output_dir, f"fold_{fold}", "training_history.json"), "r") as f:
+                history = json.load(f)
+                best_epochs.append(history["best_epoch"])
+        
+        # Compute average metrics across folds using the best metrics from each fold
+        avg_accuracy = np.mean([metrics['accuracy'] for metrics in best_metrics_list])
+        avg_precision = np.mean([metrics['precision'] for metrics in best_metrics_list])
+        avg_recall = np.mean([metrics['recall'] for metrics in best_metrics_list])
+        avg_macro_f1 = np.mean([metrics['macro_f1'] for metrics in best_metrics_list])
+        avg_weighted_f1 = np.mean([metrics['weighted_f1'] for metrics in best_metrics_list])
+        
+        # Calculate AUC average, handling possible None values
+        auc_values = [metrics['auc'] for metrics in best_metrics_list if metrics['auc'] is not None]
+        avg_auc = np.mean(auc_values) if auc_values else None
+        
+        avg_best_f1 = np.mean(best_f1_scores)
+        
+        # Print final results with clearer formatting
+        print("\n" + "="*80)
+        print("CROSS-VALIDATION RESULTS (BEST EPOCHS):")
+        print("-"*80)
+        print(f"  Average Accuracy:    {avg_accuracy:.4f}")
+        print(f"  Average Precision:   {avg_precision:.4f}")
+        print(f"  Average Recall:      {avg_recall:.4f}")
+        print(f"  Average F1 (weight): {avg_weighted_f1:.4f}")
+        print(f"  Average F1 (macro):  {avg_macro_f1:.4f}")
+        print(f"  Average AUC:         {format_metric_value(avg_auc)}")
+        print(f"  Average Best F1:     {avg_best_f1:.4f}")
+        print("="*80)
+        
+        # Per-fold summary
+        print("\nPER-FOLD METRICS (BEST EPOCHS):")
+        print("-"*80)
+        for i, metrics in enumerate(best_metrics_list):
+            print(f"Fold {i+1}:")
+            print(f"  Accuracy:  {metrics['accuracy']:.4f}")
+            print(f"  Precision: {metrics['precision']:.4f}")
+            print(f"  Recall:    {metrics['recall']:.4f}")
+            print(f"  F1:        {metrics['weighted_f1']:.4f}")
+            print(f"  AUC:       {format_metric_value(metrics['auc'])}")
+            print(f"  Best Epoch: {best_epochs[i]+1}")
+            print("-"*40)
+        
+        # Log final cross-validation results to wandb
+        if args.use_wandb:
+            wandb.log({
+                "final/avg_accuracy": avg_accuracy,
+                "final/avg_precision": avg_precision,
+                "final/avg_recall": avg_recall,
+                "final/avg_macro_f1": avg_macro_f1,
+                "final/avg_weighted_f1": avg_weighted_f1,
+                "final/avg_auc": avg_auc if avg_auc is not None else 0.0,
+                "final/avg_best_f1": avg_best_f1
+            })
+        
+        # Save cross-validation results - serialize properly
+        cv_results = {
+            'fold_metrics': [
+                {k: v for k, v in metrics.items() if k != 'confusion_matrix'}
+                for metrics in fold_results
+            ],
+            'best_metrics': [
+                {k: v for k, v in metrics.items() if k != 'confusion_matrix'}
+                for metrics in best_metrics_list
+            ],
+            'best_f1_scores': best_f1_scores,
+            'best_epochs': best_epochs,
+            'avg_accuracy': avg_accuracy,
+            'avg_precision': avg_precision,
+            'avg_recall': avg_recall,
+            'avg_macro_f1': avg_macro_f1,
+            'avg_weighted_f1': avg_weighted_f1,
+            'avg_auc': float(avg_auc) if avg_auc is not None else None,
+            'avg_best_f1': avg_best_f1
+        }
+        
+        # Properly serialize for JSON
+        serialized_results = serialize_for_json(cv_results)
+        
+        with open(os.path.join(output_dir, 'cv_results.json'), 'w') as f:
+            json.dump(serialized_results, f, indent=2)
+        
+        # Create and save run summary
+        log_file = log_run_summary(output_dir, run_name, fold_results, best_f1_scores, best_epochs, best_metrics_list)
+        
+        # Log summary file to wandb if enabled
+        if args.use_wandb:
+            wandb.save(log_file)
+        
+        print(f"\nTraining completed for {args.model_type} model. Results saved to {output_dir}")
+        
+        # Finish wandb run
+        if args.use_wandb:
+            wandb.finish()
 
 if __name__ == "__main__":
     main()
